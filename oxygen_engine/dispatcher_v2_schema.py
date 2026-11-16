@@ -190,7 +190,7 @@ class V2Config:
 def load_v2_config(path):
     path = Path(path).resolve()
     raw = read_json(path)
-    extra_keys = {'hardware_authorization'} if isinstance(raw, dict) and raw.get('execution_backend') == 'oxygen_hardware' else set()
+    extra_keys = {'hardware_authorization', 'hardware_mode', 'output_only_authorization'} if isinstance(raw, dict) and raw.get('execution_backend') == 'oxygen_hardware' else set()
     keys(raw, ROOT_KEYS | extra_keys, 'dispatcher v2')
     if type(raw.get('schema_version')) is not int or raw['schema_version'] != 2:
         raise ValueError('Expected schema_version 2')

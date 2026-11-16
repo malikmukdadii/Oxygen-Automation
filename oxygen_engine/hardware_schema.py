@@ -30,7 +30,19 @@ def confirm_hardware_outputs(config, confirmed_outputs, *, live, interlocks_conf
 
 
 def load_hardware_config(path, raw):
-    keys(raw, (ROOT_KEYS - {'simulation'}) | {'hardware_authorization'}, 'hardware dispatcher')
+    keys(raw, (ROOT_KEYS - {'simulation'}) | {'hardware_authorization', 'hardware_mode', 'output_only_authorization'}, 'hardware dispatcher')
+    mode = raw.get('hardware_mode', 'feedback_protected')
+    if mode not in {'feedback_protected', 'output_only'}:
+        raise ValueError('hardware_mode must be feedback_protected or output_only')
+    output_only = mode == 'output_only'
+    if output_only:
+        authorization = raw.get('output_only_authorization')
+        required = {'no_live_feedback_acknowledged', 'external_bus_and_regen_protection_verified'}
+        keys(authorization, required, 'output_only_authorization')
+        if set(authorization) != required or any(v is not True for v in authorization.values()):
+            raise ValueError('Output-only mode requires acknowledging absent live feedback and verified external bus/regen protection')
+    elif 'output_only_authorization' in raw:
+        raise ValueError('output_only_authorization requires hardware_mode output_only')
     if type(raw.get('schema_version')) is not int or raw['schema_version'] != 2:
         raise ValueError('Hardware requires schema_version 2')
     if raw.get('execution_backend') != 'oxygen_hardware' or raw.get('simulation_only') is not False:
@@ -110,14 +122,16 @@ def load_hardware_config(path, raw):
     number(timing.get('interval_ms'), 'interval_ms', 20, 250)
     number(timing.get('max_lateness_ms'), 'max_lateness_ms', 1, 1000)
     interlocks = raw.get('interlocks', {})
-    required_true = {'motor_requires_measured_bus_in_range', 'supply_down_requires_motor_neutral',
+    required_true = {'supply_down_requires_motor_neutral',
                      'one_active_profile_global', 'external_emergency_stop_required_for_live'}
-    keys(interlocks, required_true | {'bus_target_v', 'bus_tolerance_v', 'max_feedback_age_s',
+    keys(interlocks, required_true | {'motor_requires_measured_bus_in_range', 'bus_target_v', 'bus_tolerance_v', 'max_feedback_age_s',
          'motor_supply_demand_v', 'allow_unverified_simulated_interlock_values',
          'allow_unverified_live_interlock_values'}, 'hardware interlocks')
     if any(interlocks.get(k) is not True for k in required_true) or any(interlocks.get(k) is not False for k in (
             'allow_unverified_simulated_interlock_values', 'allow_unverified_live_interlock_values')):
         raise ValueError('Hardware requires measured-bus/neutral interlocks and forbids unverified/fake interlock values')
+    if interlocks.get('motor_requires_measured_bus_in_range') is not (not output_only):
+        raise ValueError('motor_requires_measured_bus_in_range must match hardware_mode (false only for output_only)')
     target = number(interlocks.get('bus_target_v'), 'bus target', 1, 60)
     number(interlocks.get('bus_tolerance_v'), 'bus tolerance', .01, 5)
     number(interlocks.get('max_feedback_age_s'), 'feedback age', .01, 1)
@@ -125,8 +139,11 @@ def load_hardware_config(path, raw):
     demand = number(interlocks.get('motor_supply_demand_v'), 'motor supply prerequisite', 0, supply['max_aout_v'])
     if not math.isclose(demand * supply['mapping']['gain_bus_v_per_aout_v'], target, rel_tol=1e-9, abs_tol=1e-6):
         raise ValueError('Verified supply gain, motor demand prerequisite and bus target disagree')
-    measurements = raw.get('measurement_roles')
-    if not isinstance(measurements, dict) or set(measurements) != MEASUREMENTS:
+    measurements = raw.get('measurement_roles', {} if output_only else None)
+    expected_measurements = set() if output_only else MEASUREMENTS
+    if not isinstance(measurements, dict) or set(measurements) != expected_measurements:
+        if output_only:
+            raise ValueError('Output-only mode requires measurement_roles to be empty or omitted; no feedback is read')
         raise ValueError('Declare all independent hardware measurement/interlock roles; no fixture fallback exists')
     for name, measurement in measurements.items():
         keys(measurement, {'kind', 'unit', 'channel', 'property', 'mapping_verified'}, name)
@@ -167,6 +184,15 @@ def load_hardware_config(path, raw):
             raise ValueError('Unknown hardware output role')
         filename = exact_name(assignment.get('profile'), 'hardware profile path')
         profiles[name] = load_v2_profile(Path(path).parent / filename, output, outputs[output], simulation_only=False)
+        if output_only:
+            profile = profiles[name]
+            if set(profile.requires) - {'motor_neutral', 'motor_enable'}:
+                raise ValueError('Output-only profiles cannot declare measured/external status requirements; use profiles/hardware-output-only/')
+            for step in profile.steps:
+                if (step['type'] == 'set_aout' or
+                        step['type'] == 'assert_preconditions' and set(step.get('params', {})) - {
+                            'motor_neutral', 'current_aout_must_be_zero_or_already_target', 'reject_other_start_values'}):
+                    raise ValueError('Output-only profile contains a feedback-dependent precondition or set_aout; use ramps and readback guards')
         triggers.add(trigger)
     if not profiles:
         raise ValueError('At least one enabled hardware profile is required')

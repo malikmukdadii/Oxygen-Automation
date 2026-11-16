@@ -19,9 +19,69 @@ mock regressions and complete the actual machine-specific commissioning before e
 Passing tests cannot verify wiring, external enables, voltage scaling, safe motor mechanics,
 regeneration capability or the independent emergency stop.
 
-The controller plays voltage-demand profiles open loop. Measured bus voltage only permits or
-rejects a motor step; it never adjusts the commanded AOUT to regulate bus voltage. Therefore
-requiring real feedback for this safety interlock does not make the controller closed loop.
+The controller plays voltage-demand profiles open loop. In the default `feedback_protected`
+hardware mode, measured bus voltage only permits or rejects a motor step; it never adjusts the
+commanded AOUT to regulate bus voltage. The explicit `output_only` mode below does not require
+or read live feedback. Neither mode performs closed-loop regulation.
+
+## Output-only hardware (no measurement channels)
+
+For a setup with only two AOUT demands and DOUT triggers, use
+`dispatcher.v2.hardware-output-only.example.json` and `profiles/hardware-output-only/`.
+The original hardware example and profiles remain feedback-protected by default.
+
+**Output-only operation cannot detect actual bus voltage, supply readiness, motor motion or
+regeneration conditions.** Independent, commissioned external bus/regen protection, inhibit/
+enable controls and emergency stop are required. The acknowledgement fields do not implement
+these protections. Do not select this mode merely to suppress a missing-sensor error.
+
+To migrate an existing `dispatcher.v2.hardware.local.json` without losing your verified scaling,
+connection or exact channel names:
+
+1. Add top-level `hardware_mode` with the string value `output_only`.
+2. Add top-level `output_only_authorization` with Boolean fields
+   `no_live_feedback_acknowledged` and `external_bus_and_regen_protection_verified`.
+   Both must be true, only after the conditions above have actually been established.
+3. Replace `measurement_roles` with an empty object, or remove it entirely. No numeric bus or
+   Boolean status channels are read, and no numeric-transfer/acquisition setup is sent.
+4. Set `interlocks.motor_requires_measured_bus_in_range` to false. Keep the remaining interlock
+   flags unchanged, including neutral, single-profile ownership and external emergency stop.
+5. Change each assignment's profile path from `profiles/hardware/` to
+   `profiles/hardware-output-only/`, preserving the filenames. Feedback-protected profiles
+   are deliberately refused rather than silently ignoring their requirements.
+6. Preserve the verified numeric supply gain and all five physical acknowledgements. These
+   still apply; scaling must agree with `motor_supply_demand_v` and `bus_target_v`.
+
+Alternatively, make a separate local copy without overwriting an existing file:
+
+```powershell
+if (-not (Test-Path dispatcher.v2.hardware-output-only.local.json)) { Copy-Item dispatcher.v2.hardware-output-only.example.json dispatcher.v2.hardware-output-only.local.json }
+```
+
+The new example remains incomplete: supply gain is null and all acknowledgements start false.
+Transfer only your independently verified values. The default 40 V target is a configuration
+consistency check in this mode, **not an assertion or measurement of actual bus voltage**.
+`bus_tolerance_v` and `max_feedback_age_s` are retained for config compatibility, not enforced
+as live protections in output-only mode.
+
+After configuring a local file, validate offline first (use your chosen local filename):
+
+```powershell
+.\.venv-scpi\Scripts\python.exe -m oxygen_engine dispatch-patterns --bindings dispatcher.v2.hardware-output-only.local.json
+```
+
+The plan must show `hardware_mode: output_only` and bus feedback `NONE`. Read-only AOUT
+discovery and the physical execution command below use the same local filename and unchanged
+physical-confirmation flags. Do not use demo/simulated confirmation flags.
+
+Motor startup and completion still require verified 0 V command readback; supply changes
+still require motor command neutral. Motor playback requires the configured supply-demand
+**setpoint readback**, never an inferred bus measurement. Supply holds its final demand.
+Supply-down has no live regen check in this mode; external protection must handle it.
+The initial limits and trigger/shutdown limitations below remain unchanged.
+
+New output-only regressions must be run before physical execution; they were not run during
+this implementation pass. No hardware connection or commissioning was performed.
 
 ## What the backend does not do
 
@@ -85,7 +145,7 @@ configuration does not convert it into the hardware backend.
   already-requested final demand, without requiring an externally enabled supply to be disabled.
 - All physical profile transitions remain ramps, and the motor must explicitly finish at neutral.
 
-### Real measurement/interlock bindings
+### Real measurement/interlock bindings (`feedback_protected` mode only)
 
 `dc_bus_voltage` is an independent OXYGEN numeric measurement channel in V, never the supply
 AOUT command. Its `Unit` must report V and OXYGEN acquisition must already be `Started`.
@@ -107,8 +167,9 @@ Boolean roles require actual configured OXYGEN properties returning BOOL/BOOLEAN
 
 Do not bind these roles to arbitrary always-true demo buttons. The source must accurately represent
 its verified hardware condition. There is deliberately no in-process constant/fixture fallback.
-The current software contract requires these roles, even when a particular profile does not use
+The feedback-protected mode requires these roles, even when a particular profile does not use
 all of them. Missing channels/properties or unsupported types refuse startup without AOUT writes.
+The explicit output-only mode instead requires these bindings to be absent or empty.
 
 Samples are timestamped at the start of the SCPI read. Slow/stale responses and fake sample
 provenance are rejected. This is query-age validation, not instrument-side acquisition timestamp
@@ -148,8 +209,10 @@ remain pinned; changes revoke the physical session rather than silently retarget
 
 Start configured triggers LOW, wait for hardware `preflight_passed` and `dispatcher_ready`, and
 apply one fresh LOW-to-HIGH edge at a time. The supply-up profile holds its final demand. Start
-motor motion only after real measured bus feedback is inside the configured window. Explicit
-supply-down requires motor command neutral and the actual regen/shutdown permissions.
+motor motion only after real measured bus feedback is inside the configured window when using
+feedback-protected mode. In that mode explicit supply-down requires motor command neutral and
+the actual regen/shutdown permissions. Output-only mode checks only command readbacks and
+relies on external protection; it cannot establish those physical conditions.
 
 Only one profile runs at once. There is no DOUT polling/cancel button during a profile; a trigger
 named `Ramp Disable` is not an emergency stop. Ctrl+C attempts verified motor neutral and preserves

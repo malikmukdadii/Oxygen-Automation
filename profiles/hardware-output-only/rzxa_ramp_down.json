@@ -1,0 +1,14 @@
+{
+  "schema_version": 2,
+  "name": "output_only_supply_down",
+  "simulation_only": false,
+  "output": "rzxa_voltage_demand",
+  "timeout_s": 30,
+  "completion": {"mode": "verify_zero", "value": 0.0},
+  "requires": {"motor_neutral": true},
+  "steps": [
+    {"type": "assert_preconditions", "params": {"motor_neutral": true}},
+    {"type": "ramp_aout", "params": {"channel": "rzxa_voltage_demand", "target": 0.0, "duration_s": 5.0}},
+    {"type": "hold", "params": {"duration_s": 0.2}}
+  ]
+}

@@ -1,5 +1,5 @@
 
-"""Explicitly authorized physical constant-AOUT backend with real OXYGEN feedback."""
+"""Explicitly authorized physical constant-AOUT backend with selectable feedback policy."""
 
 import math
 import re
@@ -131,6 +131,7 @@ class OxygenHardwareBackend:
         load_hardware_config(config.path, config.raw)
         confirm_hardware_outputs(config, confirmed_outputs, live=live, interlocks_confirmed=interlocks_confirmed)
         self.config, self.emit, self.clock = config, emit, clock
+        self.output_only = config.raw.get('hardware_mode', 'feedback_protected') == 'output_only'
         connection = config.raw['connection']
         self.transport = OxygenHardwareTransport(**{k: connection[k] for k in ('host', 'port', 'timeout_s')}, emit=emit)
         self.adapter = OxygenAdapter(self.transport)
@@ -153,7 +154,7 @@ class OxygenHardwareBackend:
 
     def _pin_inputs(self, channels):
         output_ids = set(self.channel_ids.values())
-        sensors = {name: m['channel'] for name, m in self.config.raw['measurement_roles'].items()}
+        sensors = {name: m['channel'] for name, m in self.config.raw.get('measurement_roles', {}).items()}
         triggers = {a['name']: a['trigger'] for a in self.config.raw['assignments'] if a.get('enabled', True)}
         for key, name in [('sensor:' + k, v) for k, v in sensors.items()] + [('trigger:' + k, v) for k, v in triggers.items()]:
             matches = [c for c in channels if c.name == name]
@@ -163,9 +164,10 @@ class OxygenHardwareBackend:
             if key in self.input_ids and self.input_ids[key] != (name, cid):
                 raise ScpiProtocolError(f'{name}: hardware input mapping changed; restart explicitly')
             self.input_ids[key] = (name, cid)
-        bus_id = self.input_ids['sensor:dc_bus_voltage'][1]
-        if any(cid == bus_id for key, (_, cid) in self.input_ids.items() if key != 'sensor:dc_bus_voltage'):
-            raise ScpiProtocolError('Measured bus channel cannot alias a trigger or Boolean interlock')
+        if not self.output_only:
+            bus_id = self.input_ids['sensor:dc_bus_voltage'][1]
+            if any(cid == bus_id for key, (_, cid) in self.input_ids.items() if key != 'sensor:dc_bus_voltage'):
+                raise ScpiProtocolError('Measured bus channel cannot alias a trigger or Boolean interlock')
 
     def connect(self):
         with self.lock:
@@ -175,7 +177,7 @@ class OxygenHardwareBackend:
             reports = self.discovery.discover()
             self.channel_ids = {role: r['channel_id'] for role, r in reports.items()}
             self._pin_inputs(self.adapter.list_channels())
-            for name, spec in self.config.raw['measurement_roles'].items():
+            for name, spec in self.config.raw.get('measurement_roles', {}).items():
                 cid = self.input_ids['sensor:' + name][1]
                 prop = 'Unit' if name == 'dc_bus_voltage' else spec['property']
                 if prop not in self.adapter.list_properties(cid):
@@ -186,12 +188,15 @@ class OxygenHardwareBackend:
                     if 'DO_Value' not in self.adapter.list_properties(cid):
                         raise ScpiProtocolError(f'{assignment["trigger"]}: Boolean DO_Value is unavailable')
                     self.read_button(assignment['trigger'])
-            self.transport.numeric_name = self.config.raw['measurement_roles']['dc_bus_voltage']['channel']
-            for name in self.config.raw['measurement_roles']:
+            if not self.output_only:
+                self.transport.numeric_name = self.config.raw['measurement_roles']['dc_bus_voltage']['channel']
+            for name in self.config.raw.get('measurement_roles', {}):
                 self.measure(name)
             self.error()
             self.transport.bind_outputs(reports, self.config.raw['outputs'])
             self.emit({'event': 'oxygen_hardware_connected', 'simulated': False,
+                       'hardware_mode': 'output_only' if self.output_only else 'feedback_protected',
+                       'live_feedback_enabled': not self.output_only,
                        'physical_hardware_authorized': True, 'output_enable_controlled': False,
                        'endpoint': f'{self.transport.host}:{self.transport.port}',
                        'outputs': reports, 'inputs': self.input_ids})
@@ -255,7 +260,7 @@ class OxygenHardwareBackend:
             self.discover()
             spec = self.config.raw['outputs'][role]
             value = number(value, 'physical demand', spec['min_aout_v'], spec['max_aout_v'])
-            if not (role == 'vesc_throttle' and value == spec['neutral_aout_v']):
+            if not self.output_only and not (role == 'vesc_throttle' and value == spec['neutral_aout_v']):
                 ready = self.measure('supply_external_ready')
                 if ready.value is not True or not 0 <= self.clock() - ready.sampled_at <= self.config.raw['interlocks']['max_feedback_age_s']:
                     raise PermissionError('Physical write refused: fresh real supply_external_ready is required')
@@ -281,6 +286,8 @@ class OxygenHardwareBackend:
 
     def measure(self, name):
         with self.lock:
+            if self.output_only:
+                raise PermissionError('Output-only mode has no live measurements; AOUT readbacks are not physical feedback')
             started = self.clock()
             self._pin_inputs(self.adapter.list_channels())
             spec = self.config.raw['measurement_roles'][name]

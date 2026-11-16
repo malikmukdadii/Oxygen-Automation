@@ -42,6 +42,7 @@ class DualOutputDispatcher:
         self.clock, self.wait, self.timeline = clock, wait, timeline
         self.outputs = config.raw['outputs']
         self.simulated = config.raw['execution_backend'] != 'oxygen_hardware'
+        self.output_only = not self.simulated and config.raw.get('hardware_mode') == 'output_only'
         self.states = {}
         self.active_profile = None
         self.active_role = None
@@ -111,7 +112,11 @@ class DualOutputDispatcher:
             self.states[role] = OutputState(actual, self.clock(), 'adopted_actual_readback' if actual else None)
         self.prepared = True
         self.snapshot('startup_actual_readback_no_state_restoration')
+        if self.output_only:
+            self.emit({'event': 'output_only_warning', 'simulated': False,
+                       'message': 'No live bus, readiness or regen feedback. Setpoint readback does not establish physical safety; external protections are required.'})
         self.emit({'event': 'preflight_passed', 'simulated': self.simulated, 'backend': self.config.raw['execution_backend'],
+                   'live_feedback_enabled': not self.simulated and not self.output_only,
                    'physical_mapping_verified': not self.simulated, 'output_enable_controlled': False})
 
     def sample(self, name, *, max_age=None):
@@ -140,6 +145,8 @@ class DualOutputDispatcher:
 
     def regen_safe(self):
         self.motor_neutral()
+        if self.output_only:
+            return
         self.require_true('regen_safe')
         self.require_true('supply_shutdown_permitted')
 
@@ -148,6 +155,8 @@ class DualOutputDispatcher:
         self.verify(SUPPLY)
         if not math.isclose(self.states[SUPPLY].value, interlocks['motor_supply_demand_v'], abs_tol=1e-6, rel_tol=0):
             raise RuntimeError('Supply demand readback is not the configured motor prerequisite')
+        if self.output_only:
+            return
         requirement = profile.requires.get('measured_bus_voltage', {})
         target = requirement.get('target_v', interlocks['bus_target_v'])
         if target != interlocks['bus_target_v']:
@@ -391,6 +400,7 @@ def run_v2_cli(args):
     config = load_v2_config(args.bindings)
     backend_name = config.raw['execution_backend']
     hardware = backend_name == 'oxygen_hardware'
+    output_only = hardware and config.raw.get('hardware_mode') == 'output_only'
     if not hardware and (getattr(args, 'confirm_physical_output', []) or getattr(args, 'confirm_hardware_interlocks', False)):
         raise ValueError('Physical confirmations require the explicit oxygen_hardware backend')
     if args.live and not hardware:
@@ -398,7 +408,7 @@ def run_v2_cli(args):
     if backend_name != 'memory_fixture' and getattr(args, 'scenario', None):
         raise ValueError('OXYGEN backends use real DOUT buttons; --scenario is memory_fixture only')
     triggers = {a['name']: a['trigger'] for a in config.raw['assignments'] if a.get('enabled', True)}
-    events = load_scenario(args.scenario, config.raw['measurement_roles'], triggers.values()) if getattr(args, 'scenario', None) else []
+    events = load_scenario(args.scenario, config.raw.get('measurement_roles', {}), triggers.values()) if getattr(args, 'scenario', None) else []
     if args.execute:
         if hardware:
             from .hardware_schema import confirm_hardware_outputs
@@ -419,7 +429,9 @@ def run_v2_cli(args):
             'fake_outputs_and_measurements': backend_name == 'memory_fixture', 'physical_actuation': False,
             'physical_actuation_requested': hardware and args.execute,
             'oxygen_demo_io': backend_name == 'oxygen_demo',
-            'bus_feedback': 'real independent OXYGEN measurement' if hardware else 'FAKE independent injected sensor',
+            'hardware_mode': config.raw.get('hardware_mode', 'feedback_protected') if hardware else None,
+            'bus_feedback': 'NONE: output-only; external protections required' if output_only else (
+                'real independent OXYGEN measurement' if hardware else 'FAKE independent injected sensor'),
             'scenario_events': len(events), 'assignments': [{'name': name, 'trigger': triggers[name], 'output': p.output,
             'completion': p.completion, 'profile': str(p.path)} for name, p in config.profiles.items()]}
     if not args.execute:

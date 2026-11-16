@@ -51,6 +51,151 @@ def save(tmp_path, raw, filename='hardware.local.json'):
     return path
 
 
+def output_only_raw():
+    raw = hardware_raw()
+    raw['hardware_mode'] = 'output_only'
+    raw['output_only_authorization'] = {
+        'no_live_feedback_acknowledged': True,
+        'external_bus_and_regen_protection_verified': True,
+    }
+    raw['measurement_roles'] = {}
+    raw['interlocks']['motor_requires_measured_bus_in_range'] = False
+    for assignment in raw['assignments']:
+        assignment['profile'] = str(ROOT / 'profiles/hardware-output-only' / Path(assignment['profile']).name)
+    return raw
+
+
+@pytest.fixture
+def output_only_backend(physical_backend, tmp_path):
+    server, old_backend, _, records = physical_backend
+    for spec in old_backend.config.raw['measurement_roles'].values():
+        cid = server._by_name.pop(spec['channel'])
+        del server._channels[cid]
+    raw = output_only_raw()
+    raw['connection'] = old_backend.config.raw['connection'].copy()
+    config = load_v2_config(save(tmp_path, raw, 'output-only.local.json'))
+    clock = old_backend.clock
+    backend = OxygenHardwareBackend(config, records.append, confirmed_outputs=CONFIRMED, live=True,
+                                    interlocks_confirmed=True, clock=clock)
+    dispatcher = DualOutputDispatcher(config, backend, records.append, clock=clock, wait=clock.wait,
+                                      timeline=boundary_timeline)
+    try:
+        yield server, backend, dispatcher, records
+    finally:
+        backend.close()
+
+
+def test_output_only_profiles_work_without_any_sensor_channels(output_only_backend, monkeypatch):
+    server, backend, dispatcher, records = output_only_backend
+    commands = []
+    server._on_command = commands.append
+    monkeypatch.setattr(backend, 'measure', lambda name: pytest.fail('Output-only must never read feedback'))
+    backend.connect()
+    dispatcher.prepare()
+    assert not any(c.startswith(':CHANNELlist:PROPerty ') for c in commands)
+    assert all(key.startswith('trigger:') for key in backend.input_ids)
+    assert backend.transport.numeric_name is None
+    before = backend.writes_attempted
+    with pytest.raises(RuntimeError, match='Supply demand readback'):
+        dispatcher.execute_profile('motor_gentle')
+    assert backend.writes_attempted == before
+    dispatcher.execute_profile('rzxa_to_40_hold')
+    dispatcher.execute_profile('motor_gentle')
+    assert dispatcher.states[MOTOR].value == 0
+    assert dispatcher.states[SUPPLY].value == .5
+    assert dispatcher.cleanup()
+    assert dispatcher.states[SUPPLY].value == .5
+    dispatcher.execute_profile('rzxa_down')
+    assert dispatcher.states[SUPPLY].value == 0
+    assert not any(c.startswith(':NUMeric:') or c == ':ACQUisition:STATe?' for c in commands)
+    assert not any(r['event'] == 'independent_feedback' for r in records)
+    assert any(r['event'] == 'output_only_warning' for r in records)
+
+
+def test_output_only_refuses_to_fabricate_measurements(output_only_backend):
+    _, backend, dispatcher, _ = output_only_backend
+    with pytest.raises(PermissionError, match='no live measurements'):
+        backend.measure('dc_bus_voltage')
+    with pytest.raises(RuntimeError, match='cannot satisfy'):
+        dispatcher.sample('dc_bus_voltage')
+
+
+def test_output_only_non_neutral_startup_never_authorizes(output_only_backend):
+    server, backend, dispatcher, _ = output_only_backend
+    server._channels[server._by_name[CONFIRMED[1]]].properties['TRION/SourceChannel_A_CONST/Const2'] = '.1'
+    backend.connect()
+    with pytest.raises(RuntimeError, match='Startup motor is not neutral'):
+        dispatcher.prepare()
+    assert not backend.authorized and not backend.transport.capabilities
+    assert backend.writes_attempted == 0
+
+
+@pytest.mark.parametrize('problem', ['output_source', 'trigger_id'])
+def test_output_only_identity_changes_revoke_capabilities(output_only_backend, problem):
+    server, backend, dispatcher, _ = output_only_backend
+    backend.connect()
+    dispatcher.prepare()
+    if problem == 'output_source':
+        server._channels[backend.channel_id(SUPPLY)].properties['TRION/SourceChannel_A'] = 'CONST1'
+    else:
+        old = next(iter(backend.input_ids.values()))[1]
+        channel = server._channels.pop(old)
+        channel.channel_id = '777'
+        server._channels['777'] = channel
+        server._by_name[channel.name] = '777'
+    with pytest.raises(ScpiProtocolError):
+        backend.discover()
+    assert not backend.authorized and not backend.transport.capabilities
+
+
+@pytest.mark.parametrize('problem', ['missing_ack', 'missing_external_protection', 'feedback_profile',
+                                      'feedback_precondition', 'measurement_present', 'wrong_interlock',
+                                      'unknown_mode', 'not_explicit', 'missing_physical_ack'])
+def test_output_only_schema_requires_explicit_consistent_configuration(tmp_path, problem):
+    raw = output_only_raw()
+    if problem == 'missing_ack':
+        raw['output_only_authorization']['no_live_feedback_acknowledged'] = False
+    elif problem == 'missing_external_protection':
+        raw['output_only_authorization']['external_bus_and_regen_protection_verified'] = False
+    elif problem == 'feedback_profile':
+        raw['assignments'][2]['profile'] = str(ROOT / 'profiles/hardware/motor_gentle.json')
+    elif problem == 'feedback_precondition':
+        profile = json.loads(Path(raw['assignments'][0]['profile']).read_text())
+        profile['steps'][0]['params']['supply_output_enabled_or_verified_external'] = True
+        raw['assignments'][0]['profile'] = str(save(tmp_path, profile, 'bad-profile.json'))
+    elif problem == 'measurement_present':
+        raw['measurement_roles'] = hardware_raw()['measurement_roles']
+    elif problem == 'wrong_interlock':
+        raw['interlocks']['motor_requires_measured_bus_in_range'] = True
+    elif problem == 'unknown_mode':
+        raw['hardware_mode'] = 'anything'
+    elif problem == 'not_explicit':
+        del raw['hardware_mode']
+        del raw['output_only_authorization']
+    else:
+        raw['hardware_authorization']['external_emergency_stop_verified'] = False
+    with pytest.raises(ValueError):
+        load_v2_config(save(tmp_path, raw))
+
+
+def test_output_only_measurement_roles_can_be_omitted(tmp_path):
+    raw = output_only_raw()
+    del raw['measurement_roles']
+    assert load_v2_config(save(tmp_path, raw)).raw['hardware_mode'] == 'output_only'
+
+
+def test_output_only_offline_preview_does_not_connect(tmp_path, monkeypatch, capsys):
+    import socket
+
+    monkeypatch.setattr(socket, 'create_connection', lambda *a, **k: pytest.fail('Offline preview must not connect'))
+    path = save(tmp_path, output_only_raw())
+    assert main(['dispatch-patterns', '--bindings', str(path)]) == 0
+    plan = json.loads(capsys.readouterr().out)
+    assert plan['hardware_mode'] == 'output_only'
+    assert plan['bus_feedback'].startswith('NONE:')
+    assert plan['physical_actuation'] is False
+
+
 def boundary_timeline(pattern, setpoint, verify, emit, **kwargs):
     for segment in pattern.segments:
         setpoint(segment.end_v)
