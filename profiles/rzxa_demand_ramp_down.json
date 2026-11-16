@@ -1,0 +1,39 @@
+{
+  "schema_version": 2,
+  "name": "rzxa_demand_ramp_down",
+  "description": "Explicit supply-demand ramp back to 0.00 V; requires motor unloaded/neutral and verified regen-safe shutdown. Does not disable RZ output.",
+  "simulation_only": true,
+  "output": "rzxa_voltage_demand",
+  "timeout_s": 10,
+  "completion": {
+    "mode": "verify_zero",
+    "value": 0.0
+  },
+  "steps": [
+    {
+      "type": "assert_preconditions",
+      "params": {
+        "motor_neutral": true,
+        "supply_shutdown_permitted": true
+      }
+    },
+    {
+      "type": "ramp_aout",
+      "params": {
+        "channel": "rzxa_voltage_demand",
+        "target": 0.0,
+        "duration_s": 5.0
+      }
+    },
+    {
+      "type": "checkpoint",
+      "params": {
+        "name": "supply_commanded_zero"
+      }
+    }
+  ],
+  "requires": {
+    "motor_neutral": true,
+    "no_unhandled_regeneration": true
+  }
+}

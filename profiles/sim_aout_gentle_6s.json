@@ -1,0 +1,12 @@
+{
+  "name": "sim_aout_gentle_6s",
+  "description": "Simulated 0 to 0.5 V pattern: 2 seconds up, 2 hold, 2 down. Use dispatch-patterns only.",
+  "timeout_s": 10,
+  "steps": [
+    {"type": "set_aout", "params": {"channel": "sim_aout", "value": 0}},
+    {"type": "ramp_aout", "params": {"channel": "sim_aout", "target": 0.5, "duration_s": 2}},
+    {"type": "hold", "params": {"duration_s": 2}},
+    {"type": "ramp_aout", "params": {"channel": "sim_aout", "target": 0, "duration_s": 2}},
+    {"type": "return_neutral", "params": {"channel": "sim_aout"}}
+  ]
+}

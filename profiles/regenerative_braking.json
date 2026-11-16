@@ -1,0 +1,81 @@
+{
+  "name": "regenerative_braking",
+  "description": "Establish drive condition, run braking phase, collect DC power and energy-recovery measurements.",
+  "timeout_s": 120,
+  "expected_conditions": {
+    "software_armed": true
+  },
+  "recording": {
+    "start": true,
+    "stop": true
+  },
+  "steps": [
+    {
+      "type": "start_recording",
+      "description": "Start recording"
+    },
+    {
+      "type": "add_marker",
+      "params": { "text": "REGEN_SETUP" }
+    },
+    {
+      "type": "set_aout",
+      "description": "Approved starting condition",
+      "params": { "channel": "vesc_throttle", "value": 2.0 }
+    },
+    {
+      "type": "hold",
+      "params": { "duration_s": 0.15 }
+    },
+    {
+      "type": "query_measurements",
+      "params": { "channels": ["dc_power", "energy"] }
+    },
+    {
+      "type": "add_marker",
+      "params": { "text": "REGEN_DRIVE" }
+    },
+    {
+      "type": "ramp_aout",
+      "description": "Drive phase",
+      "params": {
+        "channel": "vesc_throttle",
+        "target": 3.5,
+        "rate_per_s": 5.0,
+        "step_interval_s": 0.01
+      }
+    },
+    {
+      "type": "hold",
+      "params": { "duration_s": 0.15 }
+    },
+    {
+      "type": "add_marker",
+      "params": { "text": "REGEN_BRAKE" }
+    },
+    {
+      "type": "ramp_aout",
+      "description": "Verified braking phase (simulated)",
+      "params": {
+        "channel": "vesc_throttle",
+        "target": 0.2,
+        "rate_per_s": 10.0,
+        "step_interval_s": 0.01
+      }
+    },
+    {
+      "type": "query_measurements",
+      "description": "DC power and energy-recovery measurements",
+      "params": { "channels": ["dc_power", "energy"] }
+    },
+    {
+      "type": "stop_recording",
+      "description": "Stop recording"
+    },
+    {
+      "type": "return_neutral",
+      "description": "Return to idle",
+      "params": { "channel": "vesc_throttle" }
+    }
+  ]
+}

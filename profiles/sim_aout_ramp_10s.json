@@ -1,0 +1,13 @@
+{
+  "name": "sim_aout_ramp_10s",
+  "description": "Confirmed simulated AO only: 0 to 1 V in 3 s, hold 4 s, return to 0 V in 3 s. Use aout-pattern or dispatch-patterns only.",
+  "timeout_s": 15,
+  "recording": {},
+  "steps": [
+    {"type": "set_aout", "params": {"channel": "sim_aout", "value": 0.0}},
+    {"type": "ramp_aout", "params": {"channel": "sim_aout", "target": 1.0, "duration_s": 3.0, "rate_per_s": 0.3333333333333333}},
+    {"type": "hold", "params": {"duration_s": 4.0}},
+    {"type": "ramp_aout", "params": {"channel": "sim_aout", "target": 0.0, "duration_s": 3.0, "rate_per_s": 0.3333333333333333}},
+    {"type": "return_neutral", "params": {"channel": "sim_aout"}}
+  ]
+}

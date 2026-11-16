@@ -1,0 +1,136 @@
+{
+  "name": "voltage_sweep",
+  "description": "DC voltage sweep via mock RZ-XA adapter; settle, record each condition, export metadata.",
+  "timeout_s": 180,
+  "expected_conditions": {
+    "software_armed": true
+  },
+  "recording": {
+    "start": true,
+    "stop": true
+  },
+  "steps": [
+    {
+      "type": "start_recording",
+      "description": "Start recording for sweep"
+    },
+    {
+      "type": "instrument_op",
+      "description": "Enable mock RZ-XA output",
+      "params": {
+        "instrument": "rzxa",
+        "op": "set_output",
+        "value": true
+      }
+    },
+    {
+      "type": "instrument_op",
+      "description": "Set current limit",
+      "params": {
+        "instrument": "rzxa",
+        "op": "set_current_limit",
+        "value": 5.0
+      }
+    },
+    {
+      "type": "add_marker",
+      "params": { "text": "SWEEP_48V" }
+    },
+    {
+      "type": "instrument_op",
+      "description": "Approved DC bus setpoint 48 V",
+      "params": {
+        "instrument": "rzxa",
+        "op": "set_voltage",
+        "value": 48.0
+      }
+    },
+    {
+      "type": "hold",
+      "description": "Wait for settling",
+      "params": { "duration_s": 0.2 }
+    },
+    {
+      "type": "query_measurements",
+      "params": { "channels": ["dc_power", "energy"] }
+    },
+    {
+      "type": "instrument_op",
+      "params": { "instrument": "rzxa", "op": "query" }
+    },
+    {
+      "type": "add_marker",
+      "params": { "text": "SWEEP_60V" }
+    },
+    {
+      "type": "instrument_op",
+      "description": "Approved DC bus setpoint 60 V",
+      "params": {
+        "instrument": "rzxa",
+        "op": "set_voltage",
+        "value": 60.0
+      }
+    },
+    {
+      "type": "hold",
+      "description": "Wait for settling",
+      "params": { "duration_s": 0.2 }
+    },
+    {
+      "type": "query_measurements",
+      "params": { "channels": ["dc_power", "energy"] }
+    },
+    {
+      "type": "add_marker",
+      "params": { "text": "SWEEP_72V" }
+    },
+    {
+      "type": "instrument_op",
+      "description": "Approved DC bus setpoint 72 V",
+      "params": {
+        "instrument": "rzxa",
+        "op": "set_voltage",
+        "value": 72.0
+      }
+    },
+    {
+      "type": "hold",
+      "params": { "duration_s": 0.2 }
+    },
+    {
+      "type": "query_measurements",
+      "params": { "channels": ["dc_power", "energy"] }
+    },
+    {
+      "type": "instrument_op",
+      "description": "Disable mock RZ-XA output",
+      "params": {
+        "instrument": "rzxa",
+        "op": "set_output",
+        "value": false
+      }
+    },
+    {
+      "type": "instrument_op",
+      "description": "Return voltage to 0 (metadata export via query)",
+      "params": {
+        "instrument": "rzxa",
+        "op": "set_voltage",
+        "value": 0.0
+      }
+    },
+    {
+      "type": "instrument_op",
+      "description": "Export run metadata (query)",
+      "params": { "instrument": "rzxa", "op": "query" }
+    },
+    {
+      "type": "stop_recording",
+      "description": "Stop recording"
+    },
+    {
+      "type": "return_neutral",
+      "params": { "channel": "vesc_throttle" }
+    }
+  ]
+}

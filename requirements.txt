@@ -1,0 +1,4 @@
+# OXYGEN Automation Engine — runtime and test dependencies
+# Python 3.11+ required
+
+pytest>=7.4,<9

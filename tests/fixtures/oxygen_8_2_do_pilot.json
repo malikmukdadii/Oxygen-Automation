@@ -1,0 +1,42 @@
+{
+  "provenance": "Selected records from the user's first real OXYGEN 8.2 watch-do run, pasted in the conversation. Windows contain consecutive samples; samples between the windows are intentionally omitted.",
+  "run_id": "c09bbf56258f4ae1a876b1f20b3e5d6f",
+  "channel": "DO 3/1 Sim",
+  "channel_id": "8898268430164033637",
+  "property": "DO_Value",
+  "requested_poll_interval_ms": 50,
+  "rising_sample_window": [
+    {"sample_started_monotonic_s": 340927.2949511, "query_latency_ms": 1.4186999760568142, "raw": "(BOOL,OFF)", "state": false},
+    {"sample_started_monotonic_s": 340927.3565935, "query_latency_ms": 1.1147999903187156, "raw": "(BOOL,ON)", "state": true},
+    {"sample_started_monotonic_s": 340927.4190065, "query_latency_ms": 1.6201999969780445, "raw": "(BOOL,ON)", "state": true},
+    {"sample_started_monotonic_s": 340927.4813815, "query_latency_ms": 1.3586999848484993, "raw": "(BOOL,ON)", "state": true}
+  ],
+  "falling_sample_window": [
+    {"sample_started_monotonic_s": 340928.9687582, "query_latency_ms": 1.194800017401576, "raw": "(BOOL,ON)", "state": true},
+    {"sample_started_monotonic_s": 340929.0306778, "query_latency_ms": 1.860499964095652, "raw": "(BOOL,OFF)", "state": false},
+    {"sample_started_monotonic_s": 340929.0928206, "query_latency_ms": 1.2829999905079603, "raw": "(BOOL,OFF)", "state": false}
+  ],
+  "transitions": [
+    {"ts": "2026-11-16T17:08:03.885893+00:00", "edge": "baseline", "state": false, "press": false, "press_count": 0},
+    {"ts": "2026-11-16T17:08:05.864683+00:00", "edge": "rising", "state": true, "press": true, "press_count": 1},
+    {"ts": "2026-11-16T17:08:07.539596+00:00", "edge": "falling", "state": false, "press": false, "press_count": 1, "observed_high_ms": 1674.8299999744631}
+  ],
+  "summary": {
+    "samples": 81,
+    "valid_samples": 81,
+    "property_presses": 1,
+    "numeric_presses": 0,
+    "stale_samples": 0,
+    "mismatches": 0,
+    "errors": 0,
+    "timeouts": 0,
+    "reconnects": 0,
+    "presses_detected": 1,
+    "operator_expected_presses": null,
+    "elapsed_s": 5.023531600018032,
+    "poll_gaps": {"count": 80, "p50_ms": 61.9299000245519, "p95_ms": 62.96349997865036, "max_ms": 63.84489999618381},
+    "query_latencies": {"count": 169, "p50_ms": 0.5613000248558819, "p95_ms": 1.1625000042840838, "max_ms": 5.5951999966055155},
+    "milestone_verified": false
+  },
+  "acceptance_note": "One real property OFF/ON/OFF cycle was detected without repeat events. An independent operator action count/timing record and repeated short-interaction/startup/reconnect trials have not been supplied. Reliability milestone remains pending."
+}

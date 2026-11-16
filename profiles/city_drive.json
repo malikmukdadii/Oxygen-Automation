@@ -1,0 +1,96 @@
+{
+  "name": "city_drive",
+  "description": "City-drive profile: accelerate, cruise, brake; collect power/RPM/energy; return to idle.",
+  "timeout_s": 120,
+  "expected_conditions": {
+    "software_armed": true
+  },
+  "recording": {
+    "start": true,
+    "stop": true
+  },
+  "steps": [
+    {
+      "type": "start_recording",
+      "description": "Start OXYGEN recording"
+    },
+    {
+      "type": "add_marker",
+      "description": "Mark acceleration phase",
+      "params": { "text": "CITY_ACCEL" }
+    },
+    {
+      "type": "ramp_aout",
+      "description": "Acceleration stage",
+      "params": {
+        "channel": "vesc_throttle",
+        "target": 3.0,
+        "rate_per_s": 6.0,
+        "step_interval_s": 0.01
+      }
+    },
+    {
+      "type": "hold",
+      "description": "Brief accel settle",
+      "params": { "duration_s": 0.15 }
+    },
+    {
+      "type": "query_measurements",
+      "description": "Collect DC/AC power, RPM, energy",
+      "params": {
+        "channels": ["dc_power", "ac_power", "rpm", "energy"]
+      }
+    },
+    {
+      "type": "add_marker",
+      "description": "Mark cruise phase",
+      "params": { "text": "CITY_CRUISE" }
+    },
+    {
+      "type": "set_aout",
+      "description": "Cruise setpoint",
+      "params": { "channel": "vesc_throttle", "value": 2.5 }
+    },
+    {
+      "type": "hold",
+      "description": "Cruise hold",
+      "params": { "duration_s": 0.2 }
+    },
+    {
+      "type": "query_measurements",
+      "params": {
+        "channels": ["dc_power", "ac_power", "rpm", "energy"]
+      }
+    },
+    {
+      "type": "add_marker",
+      "description": "Mark braking phase",
+      "params": { "text": "CITY_BRAKE" }
+    },
+    {
+      "type": "ramp_aout",
+      "description": "Braking stage",
+      "params": {
+        "channel": "vesc_throttle",
+        "target": 0.5,
+        "rate_per_s": 8.0,
+        "step_interval_s": 0.01
+      }
+    },
+    {
+      "type": "query_measurements",
+      "params": {
+        "channels": ["dc_power", "ac_power", "rpm", "energy"]
+      }
+    },
+    {
+      "type": "stop_recording",
+      "description": "Stop OXYGEN recording"
+    },
+    {
+      "type": "return_neutral",
+      "description": "Return to defined idle state",
+      "params": { "channel": "vesc_throttle" }
+    }
+  ]
+}

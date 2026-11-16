@@ -1,0 +1,60 @@
+{
+  "provenance": "User-pasted results from the real OXYGEN 8.2 installation at 127.0.0.1:10001, with simulated I/O channels. This is a selected regression corpus, not a complete session capture.",
+  "raw_payload_note": "Property replies are exactly the payloads printed by ScpiTransport.query; optional headers were already removed. Numeric samples and discovery below were captured only as decoded CLI output. Do not treat reconstructed wire syntax as observed.",
+  "identification_payload": "DEWETRON,OXYGEN,00000001,8.2",
+  "channel_discovery_decoded_subset": [
+    {"id": "8898268430164033617", "name": "AO 3/1 Sim"},
+    {"id": "8898268430164033618", "name": "AO 3/2 Sim"},
+    {"id": "8898268430164033637", "name": "DO 3/1 Sim"},
+    {"id": "8898268430164033559", "name": "AI 1/1 Sim"},
+    {"id": "8898268430164033560", "name": "AI 1/2 Sim"}
+  ],
+  "ao_observations": [
+    {
+      "name": "AO 3/1 Sim",
+      "id": "8898268430164033617",
+      "observed_attribute_subset": ["Mode", "Range", "Unit", "TRION/OutputMode", "TRION/SourceChannel_A_CONST/Const0", "TRION/FGenProperties/AoWaveformLookup0", "TRION/FGenProperties/AoWaveformLookup1", "TRION/FGenProperties/AoWaveformLookup2", "TRION/FGenProperties/AoWaveformLookup3"],
+      "property_payloads": {
+        "Mode": "(STRING,\"ConstOutput\")",
+        "Range": "(RANGE,-10.0,\"V\",10.0,\"V\")",
+        "Unit": "(STRING,\"V\")",
+        "TRION/OutputMode": "(STRING,\"HighSpeed\")",
+        "TRION/SourceChannel_A_CONST/Const0": "(SCALAR,0.0,\"V\")"
+      }
+    },
+    {
+      "name": "AO 3/2 Sim",
+      "id": "8898268430164033618",
+      "observed_attribute_subset": ["Mode", "Range", "Unit", "TRION/OutputMode", "TRION/SourceChannel_A_CONST/Const1", "TRION/FGenProperties/AoWaveformLookup0", "TRION/FGenProperties/AoWaveformLookup1", "TRION/FGenProperties/AoWaveformLookup2", "TRION/FGenProperties/AoWaveformLookup3"],
+      "property_payloads": {
+        "Mode": "(STRING,\"ConstOutput\")",
+        "Range": "(RANGE,-10.0,\"V\",10.0,\"V\")",
+        "Unit": "(STRING,\"V\")",
+        "TRION/OutputMode": "(STRING,\"HighSpeed\")",
+        "TRION/SourceChannel_A_CONST/Const1": "(SCALAR,0.0,\"V\")"
+      }
+    }
+  ],
+  "do_observation": {
+    "name": "DO 3/1 Sim",
+    "id": "8898268430164033637",
+    "attribute_names_payload": "\"Used\",\"ChannelType\",\"ID:TRION/TrionetNodeIndex\",\"ID:TRION/BoardId\",\"ID:TRION/SlotNumber\",\"ID:TRION/ChannelIndex\",\"ID:TRION/ChannelType\",\"ShortId\",\"DefaultName\",\"SampleUpdateType\",\"SampleRate\",\"TRION/Oversampling\",\"ID:TRION/BoardName\",\"AdditionalChannelInfo2\",\"ID:TRION/BoardSerialNumber\",\"ID:TRION/BoardBaseModel\",\"ID:TRION/BoardBaseVersion\",\"ID:TRION/ConnectorPanelSerialNumber\",\"ID:TRION/BoardConnectorPanelModel\",\"ID:TRION/BoardConnectorPanelVersion\",\"Mode\",\"DO_Value\",\"Range\",\"Unit\",\"Direction\",\"AcquisitionRate\",\"Neon/Color\",\"Neon/UserChannelTags\",\"Neon/Name\",\"Neon/NameUnique\",\"Neon/NamePotentiallyUnique\",\"Neon/DomainUrl\",\"Neon/LongName\",\"Neon/Comment\",\"Neon/Active\",\"Neon/ReducedFormat\",\"Neon/SensorName\",\"Neon/SensorID\",\"ScaledShuntTarget\"",
+    "property_payloads": {
+      "Mode": "(STRING,\"DIO\")",
+      "DO_Value": "(BOOL,OFF)",
+      "Direction": "(STRING,\"output\")"
+    },
+    "ui_transition_verified": false,
+    "physical_feedback_verified": false
+  },
+  "acquisition_state_decoded": "Started",
+  "recording_state_decoded": "Stopped",
+  "numeric_dimensions_wire_reply": ":NUM:DIMS 1",
+  "numeric_dimensions_query": ":NUMeric:NORMal:DIMS?",
+  "numeric_samples_decoded": [
+    {"channels": ["AI 1/1 Sim"], "values": [-1.4990498]},
+    {"channels": ["AI 1/1 Sim", "AI 1/2 Sim"], "values": [-5.4763761, 2.472135]}
+  ],
+  "error_queue_decoded": [],
+  "safety": "No physical output writes were validated. DO UI-to-state transitions have not yet been demonstrated. Live-control flags remain disabled."
+}

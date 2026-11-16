@@ -1,0 +1,91 @@
+{
+  "schema_version": 2,
+  "name": "motor_cruise_steps",
+  "description": "Motor-only multi-level throttle pattern with controlled transitions in simulation, all targets uncommissioned.",
+  "simulation_only": true,
+  "output": "vesc_throttle",
+  "timeout_s": 22,
+  "completion": {
+    "mode": "return_neutral",
+    "value": 0.0
+  },
+  "steps": [
+    {
+      "type": "assert_preconditions",
+      "params": {
+        "bus_voltage_validated": true
+      }
+    },
+    {
+      "type": "set_aout",
+      "params": {
+        "channel": "vesc_throttle",
+        "value": 0
+      }
+    },
+    {
+      "type": "ramp_aout",
+      "params": {
+        "channel": "vesc_throttle",
+        "target": 0.2,
+        "duration_s": 2
+      }
+    },
+    {
+      "type": "hold",
+      "params": {
+        "duration_s": 2
+      }
+    },
+    {
+      "type": "ramp_aout",
+      "params": {
+        "channel": "vesc_throttle",
+        "target": 0.4,
+        "duration_s": 2
+      }
+    },
+    {
+      "type": "hold",
+      "params": {
+        "duration_s": 3
+      }
+    },
+    {
+      "type": "ramp_aout",
+      "params": {
+        "channel": "vesc_throttle",
+        "target": 0.25,
+        "duration_s": 2
+      }
+    },
+    {
+      "type": "hold",
+      "params": {
+        "duration_s": 2
+      }
+    },
+    {
+      "type": "ramp_aout",
+      "params": {
+        "channel": "vesc_throttle",
+        "target": 0.0,
+        "duration_s": 3
+      }
+    },
+    {
+      "type": "return_neutral",
+      "params": {
+        "channel": "vesc_throttle"
+      }
+    }
+  ],
+  "requires": {
+    "measured_bus_voltage": {
+      "target_v": 40.0,
+      "tolerance_v": 2.0,
+      "max_age_s": 1.0
+    },
+    "motor_enable": "operator_verified"
+  }
+}

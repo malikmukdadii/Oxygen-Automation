@@ -1,0 +1,42 @@
+
+# Python environments and generated files
+.venv*/
+venv/
+env/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+build/
+dist/
+*.egg-info/
+
+# IDE state and runtime logs
+.vs/
+.vscode/
+logs/
+*.log
+
+# Machine-specific settings; commit example files instead
+/config.json
+/dispatcher.json
+/dispatcher.v2.oxygen-demo.json
+/dispatcher.v2.my-machine.json
+*.local.json
+
+# Secrets and local backups
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.pfx
+*.p12
+*.bak
+*.backup-*
+backups/

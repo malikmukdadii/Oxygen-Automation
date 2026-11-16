@@ -1,0 +1,48 @@
+{
+  "schema_version": 2,
+  "name": "rzxa_demand_ramp_40v_hold",
+  "description": "RZ-XA-6k-H CV demand: from verified zero, ramp to 0.500 V over 5s; then persist the last AOUT setpoint. If already at target, no-op; otherwise fail closed. Provisional 40V equivalence UNVERIFIED. Never enables RZ output.",
+  "simulation_only": true,
+  "output": "rzxa_voltage_demand",
+  "timeout_s": 14,
+  "completion": {
+    "mode": "hold_final",
+    "value": 0.5,
+    "operator_action_required_to_stop": true
+  },
+  "steps": [
+    {
+      "type": "assert_preconditions",
+      "params": {
+        "supply_output_enabled_or_verified_external": true,
+        "motor_neutral": true,
+        "current_aout_must_be_zero_or_already_target": true,
+        "reject_other_start_values": true
+      }
+    },
+    {
+      "type": "ramp_aout",
+      "params": {
+        "channel": "rzxa_voltage_demand",
+        "target": 0.5,
+        "duration_s": 5.0
+      }
+    },
+    {
+      "type": "hold",
+      "params": {
+        "duration_s": 3.0
+      }
+    },
+    {
+      "type": "checkpoint",
+      "params": {
+        "name": "supply_commanded_hold"
+      }
+    }
+  ],
+  "requires": {
+    "supply_output_enable": "external_or_explicitly_verified",
+    "measured_bus_feedback": "required_for_motor_interlock"
+  }
+}

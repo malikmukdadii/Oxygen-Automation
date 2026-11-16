@@ -1,0 +1,152 @@
+{
+  "connection": {
+    "host": "127.0.0.1",
+    "port": 10001,
+    "timeout_s": 2.0,
+    "reconnect_min_s": 0.5,
+    "reconnect_max_s": 8.0,
+    "reconnect_max_attempts": 10,
+    "use_mock": true,
+    "mock_port": 0
+  },
+  "polling_interval_ms": 250,
+  "debounce_ms": 50,
+  "software_armed_default": false,
+  "profiles_dir": "profiles",
+  "do_state_property_candidates": [
+    "Value",
+    "State",
+    "DigitalValue",
+    "TRION/DigitalOut/Value",
+    "Output"
+  ],
+  "channels": [
+    {
+      "logical_name": "aout1",
+      "oxygen_name": "Test Aout1",
+      "channel_id": "4152600322822373457",
+      "role": "aout"
+    },
+    {
+      "logical_name": "aout2",
+      "oxygen_name": "Test Aout2",
+      "channel_id": "4152600322822373458",
+      "role": "aout"
+    },
+    {
+      "logical_name": "dc_power",
+      "oxygen_name": "DC Power",
+      "role": "measurement"
+    },
+    {
+      "logical_name": "ac_power",
+      "oxygen_name": "AC Power",
+      "role": "measurement"
+    },
+    {
+      "logical_name": "rpm",
+      "oxygen_name": "RPM",
+      "role": "measurement"
+    },
+    {
+      "logical_name": "energy",
+      "oxygen_name": "Energy",
+      "role": "measurement"
+    }
+  ],
+  "do_commands": [
+    {
+      "logical_name": "do_3_1",
+      "oxygen_name": "DO 3/1 Sim",
+      "command": "start_city",
+      "edge": "rising",
+      "state_property": "Value"
+    },
+    {
+      "logical_name": "do_3_2",
+      "oxygen_name": "DO 3/2 Sim",
+      "command": "start_regen",
+      "edge": "rising",
+      "state_property": "Value"
+    },
+    {
+      "logical_name": "do_3_3",
+      "oxygen_name": "DO 3/3 Sim",
+      "command": "start_voltage_sweep",
+      "edge": "rising",
+      "state_property": "Value"
+    },
+    {
+      "logical_name": "do_3_4",
+      "oxygen_name": "DO 3/4 Sim",
+      "command": "cancel",
+      "edge": "rising",
+      "state_property": "Value"
+    },
+    {
+      "logical_name": "do_3_5",
+      "oxygen_name": "DO 3/5 Sim",
+      "command": "toggle_recording",
+      "edge": "rising",
+      "state_property": "Value"
+    },
+    {
+      "logical_name": "do_3_6",
+      "oxygen_name": "DO 3/6 Sim",
+      "command": "toggle_arm",
+      "edge": "rising",
+      "state_property": "Value"
+    }
+  ],
+  "aout_roles": [
+    {
+      "logical_name": "vesc_throttle",
+      "oxygen_name": "Test Aout1",
+      "channel_id": "4152600322822373457",
+      "role": "vesc",
+      "min_value": 0.0,
+      "max_value": 5.0,
+      "neutral_value": 0.0,
+      "const_property": "TRION/SourceChannel_A_CONST/Const0",
+      "mode_property": "Mode",
+      "range_property": "Range"
+    },
+    {
+      "logical_name": "aux_aout",
+      "oxygen_name": "Test Aout2",
+      "channel_id": "4152600322822373458",
+      "role": "none",
+      "min_value": -10.0,
+      "max_value": 10.0,
+      "neutral_value": 0.0
+    }
+  ],
+  "live_control": {
+    "enable_live_aout": false,
+    "enable_live_do_reset": false,
+    "enable_real_rzxa": false,
+    "aout_commands_verified": false,
+    "do_property_verified": false,
+    "rzxa_commands_verified": false
+  },
+  "recording": {
+    "auto_start_on_profile": false,
+    "marker_prefix": "AUTO"
+  },
+  "logging": {
+    "level": "INFO",
+    "jsonl_dir": "logs",
+    "console_dashboard": true,
+    "diagnostic_poll_logging": false
+  },
+  "instruments": {
+    "rzxa": {
+      "host": "127.0.0.1",
+      "port": 5025,
+      "use_mock": true,
+      "voltage_min": 0.0,
+      "voltage_max": 80.0,
+      "current_limit_default": 10.0
+    }
+  }
+}

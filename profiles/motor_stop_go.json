@@ -1,0 +1,91 @@
+{
+  "schema_version": 2,
+  "name": "motor_stop_go",
+  "description": "Motor-only two low-amplitude pulses in simulation. Never edits RZ-XA demand.",
+  "simulation_only": true,
+  "output": "vesc_throttle",
+  "timeout_s": 20,
+  "completion": {
+    "mode": "return_neutral",
+    "value": 0.0
+  },
+  "steps": [
+    {
+      "type": "assert_preconditions",
+      "params": {
+        "bus_voltage_validated": true
+      }
+    },
+    {
+      "type": "set_aout",
+      "params": {
+        "channel": "vesc_throttle",
+        "value": 0.0
+      }
+    },
+    {
+      "type": "ramp_aout",
+      "params": {
+        "channel": "vesc_throttle",
+        "target": 0.2,
+        "duration_s": 2
+      }
+    },
+    {
+      "type": "hold",
+      "params": {
+        "duration_s": 2
+      }
+    },
+    {
+      "type": "ramp_aout",
+      "params": {
+        "channel": "vesc_throttle",
+        "target": 0.0,
+        "duration_s": 2
+      }
+    },
+    {
+      "type": "hold",
+      "params": {
+        "duration_s": 2
+      }
+    },
+    {
+      "type": "ramp_aout",
+      "params": {
+        "channel": "vesc_throttle",
+        "target": 0.35,
+        "duration_s": 2
+      }
+    },
+    {
+      "type": "hold",
+      "params": {
+        "duration_s": 2
+      }
+    },
+    {
+      "type": "ramp_aout",
+      "params": {
+        "channel": "vesc_throttle",
+        "target": 0.0,
+        "duration_s": 2
+      }
+    },
+    {
+      "type": "return_neutral",
+      "params": {
+        "channel": "vesc_throttle"
+      }
+    }
+  ],
+  "requires": {
+    "measured_bus_voltage": {
+      "target_v": 40.0,
+      "tolerance_v": 2.0,
+      "max_age_s": 1.0
+    },
+    "motor_enable": "operator_verified"
+  }
+}

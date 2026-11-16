@@ -1,0 +1,17 @@
+{
+  "name": "sim_aout_double_8s",
+  "description": "Simulated 0 to 0.75 V double pulse with one-second ramps/holds. Use dispatch-patterns only.",
+  "timeout_s": 12,
+  "steps": [
+    {"type": "set_aout", "params": {"channel": "sim_aout", "value": 0}},
+    {"type": "ramp_aout", "params": {"channel": "sim_aout", "target": 0.75, "duration_s": 1}},
+    {"type": "hold", "params": {"duration_s": 1}},
+    {"type": "ramp_aout", "params": {"channel": "sim_aout", "target": 0, "duration_s": 1}},
+    {"type": "hold", "params": {"duration_s": 1}},
+    {"type": "ramp_aout", "params": {"channel": "sim_aout", "target": 0.75, "duration_s": 1}},
+    {"type": "hold", "params": {"duration_s": 1}},
+    {"type": "ramp_aout", "params": {"channel": "sim_aout", "target": 0, "duration_s": 1}},
+    {"type": "hold", "params": {"duration_s": 1}},
+    {"type": "return_neutral", "params": {"channel": "sim_aout"}}
+  ]
+}
