@@ -1,5 +1,9 @@
 # Configurable V2 AOUT discovery
 
+For explicitly authorized physical outputs, use the separate `oxygen_hardware` backend described
+in [physical open-loop operation](hardware-open-loop.md). The demo approvals below still apply
+only to `oxygen_demo`; discovery alone does not grant physical write capabilities.
+
 ## Configure the selected OXYGEN instance
 
 Copy `dispatcher.v2.oxygen-demo.json` to a machine-specific file. Keep it alongside the

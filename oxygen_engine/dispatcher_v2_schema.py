@@ -96,13 +96,13 @@ class V2Profile:
     requires: dict
 
 
-def load_v2_profile(path, output, spec):
+def load_v2_profile(path, output, spec, *, simulation_only=True):
     path = Path(path).resolve()
     raw = read_json(path)
     keys(raw, {'schema_version', 'name', 'description', 'simulation_only', 'output', 'timeout_s',
                'completion', 'steps', 'requires'}, str(path))
-    if type(raw.get('schema_version')) is not int or raw['schema_version'] != 2 or raw.get('simulation_only') is not True:
-        raise ValueError('V2 profiles require schema_version 2 and simulation_only true')
+    if type(raw.get('schema_version')) is not int or raw['schema_version'] != 2 or raw.get('simulation_only') is not simulation_only:
+        raise ValueError(f'V2 profiles require schema_version 2 and simulation_only {str(simulation_only).lower()}')
     if raw.get('output') != output or not isinstance(raw.get('name'), str) or not raw['name']:
         raise ValueError('Profile name/output does not match assignment')
     completion = raw.get('completion', {'mode': spec['completion_policy'], 'value': spec.get('neutral_aout_v', 0)})
@@ -190,9 +190,14 @@ class V2Config:
 def load_v2_config(path):
     path = Path(path).resolve()
     raw = read_json(path)
-    keys(raw, ROOT_KEYS, 'dispatcher v2')
+    extra_keys = {'hardware_authorization'} if isinstance(raw, dict) and raw.get('execution_backend') == 'oxygen_hardware' else set()
+    keys(raw, ROOT_KEYS | extra_keys, 'dispatcher v2')
     if type(raw.get('schema_version')) is not int or raw['schema_version'] != 2:
         raise ValueError('Expected schema_version 2')
+    if raw.get('execution_backend') == 'oxygen_hardware':
+        from .hardware_schema import load_hardware_config
+
+        return load_hardware_config(path, raw)
     validate_permissions(raw)
     backend = raw.get('execution_backend')
     if backend not in {'memory_fixture', 'oxygen_demo'}:

@@ -1,0 +1,22 @@
+
+{
+  "schema_version": 2,
+  "name": "physical_motor_gentle",
+  "simulation_only": false,
+  "output": "vesc_throttle",
+  "timeout_s": 30,
+  "completion": {"mode": "return_neutral", "value": 0.0},
+  "requires": {
+    "motor_neutral": true,
+    "motor_enable": "operator_verified",
+    "measured_bus_feedback": "required_for_motor_interlock",
+    "measured_bus_voltage": {"target_v": 40.0, "tolerance_v": 2.0, "max_age_s": 1.0}
+  },
+  "steps": [
+    {"type": "assert_preconditions", "params": {"motor_neutral": true, "supply_output_enabled_or_verified_external": true, "bus_voltage_validated": true}},
+    {"type": "ramp_aout", "params": {"channel": "vesc_throttle", "target": 0.25, "duration_s": 5.0}},
+    {"type": "hold", "params": {"duration_s": 2.0}},
+    {"type": "ramp_aout", "params": {"channel": "vesc_throttle", "target": 0.0, "duration_s": 3.0}},
+    {"type": "return_neutral", "params": {"channel": "vesc_throttle"}}
+  ]
+}

@@ -96,7 +96,7 @@ def build_parser() -> argparse.ArgumentParser:
     pattern.add_argument('--max-trigger-gap-ms', type=float, default=250.0,
                          help='Discard trigger edges across stale observations')
 
-    dispatcher = sub.add_parser('dispatch-patterns', help='Validate or run configured simulated DO/profile/AOUT assignments')
+    dispatcher = sub.add_parser('dispatch-patterns', help='Validate or run configured DO/profile/AOUT assignments with an explicitly selected backend')
     dispatcher.add_argument('--bindings', default=str(_project_root() / 'dispatcher.example.json'),
                             help='Dispatcher JSON file; profile paths are relative to this file')
     dispatcher.add_argument('--execute', action='store_true', help='Run persistently; default validates offline')
@@ -106,6 +106,10 @@ def build_parser() -> argparse.ArgumentParser:
     dispatcher.add_argument('--scenario', help='V2 in-process fixture events only; never used with OXYGEN')
     dispatcher.add_argument('--confirm-demo-output', action='append', default=[], metavar='EXACT_CHANNEL_NAME',
                             help='OXYGEN demo only: confirm each selected AO is genuinely simulated and unconnected (repeat for both)')
+    dispatcher.add_argument('--confirm-physical-output', action='append', default=[], metavar='EXACT_CHANNEL_NAME',
+                            help='Hardware only: explicitly authorize each configured physical AOUT for this run (repeat for both)')
+    dispatcher.add_argument('--confirm-hardware-interlocks', action='store_true',
+                            help='Hardware only: acknowledge verified wiring/scaling/neutral, external enables and independent emergency stop')
 
     migration = sub.add_parser('migrate-dispatcher', help='Back up and migrate an existing dispatcher to schema v2 compatibility')
     migration.add_argument('--source', required=True, help='Existing unversioned dispatcher JSON')

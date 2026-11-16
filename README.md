@@ -1,8 +1,23 @@
 # OXYGEN Automation
 
 Configurable OXYGEN SCPI discovery and simulation-first dual-AOUT profile dispatch.
-**The current V2 backend is simulation-only, not a commissioned physical-hardware controller.**
-Passing mock tests or running OXYGEN simulated outputs does not authorize physical actuation.
+**The demo backend remains simulation-only.** A separate experimental `oxygen_hardware` backend
+requires explicit physical authorization and real measured interlocks; it is not commissioned
+by passing mock tests or by running simulated outputs.
+
+## Physical open-loop backend
+
+See [physical-AOUT open-loop operation](docs/hardware-open-loop.md) for the new, separately gated
+`oxygen_hardware` path. It reuses automatic channel/constant discovery without the demo-name
+allowlist, supports explicitly verified 0 V motor neutral and a configured ceiling up to 3.3 V,
+and retains supply-demand persistence and motor-neutral completion. Initial supplied profiles
+remain limited to 0.5 V supply demand and a 0.25 V gentle motor peak, not full throttle.
+
+Copy `dispatcher.v2.hardware.example.json` to `dispatcher.v2.hardware.local.json` for a physical
+setup. The example deliberately has unverified authorization acknowledgements, no numeric supply
+gain, and no real feedback/interlock bindings; it cannot run unchanged. Supply/motor enables
+remain external. No fake bus voltage or simulated permission is accepted by this backend.
+Hardware-specific mock tests are provided but have not yet been executed in this implementation pass.
 
 ## Getting started on Windows
 
@@ -34,7 +49,8 @@ Commit source, tests, profiles, documentation, and example configurations. `.git
 virtual environments, IDE state, Python/test caches, runtime logs, secrets, backups, and local
 `config.json`, `dispatcher.json`, and `dispatcher.v2.oxygen-demo.json`. Additional machine-specific
 configurations can use a `*.local.json` name. Local settings are not deleted or changed by Git setup.
-Use `config.example.json`, `dispatcher.example.json`, or `dispatcher.v2.oxygen-demo.example.json`
+Use `config.example.json`, `dispatcher.example.json`, `dispatcher.v2.oxygen-demo.example.json`,
+or `dispatcher.v2.hardware.example.json`
 as the corresponding shareable template. Do not commit credentials or replace the examples with
 commissioned physical-hardware settings.
 

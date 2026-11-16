@@ -21,7 +21,7 @@ Do not use the test bindings as a machine configuration or as evidence of physic
 From the project root, run the focused checks using the existing environment:
 
 ```powershell
-.\.venv-scpi\Scripts\python.exe -m pytest -q tests/test_dispatcher_v2.py tests/test_oxygen_demo_backend.py tests/test_aout_discovery.py
+.\.venv-scpi\Scripts\python.exe -m pytest -q tests/test_dispatcher_v2.py tests/test_oxygen_demo_backend.py tests/test_aout_discovery.py tests/test_oxygen_hardware_backend.py
 ```
 
 These are mock/in-memory tests, not validation of a connected OXYGEN setup. A real setup must

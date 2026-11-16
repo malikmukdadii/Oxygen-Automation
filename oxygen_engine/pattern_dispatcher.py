@@ -295,7 +295,7 @@ class StrictRotatingHandler(RotatingFileHandler):
 
 def run_dispatcher(args):
     raw = json.loads(Path(args.bindings).read_text(encoding='utf-8'))
-    if isinstance(raw, dict) and raw.get('schema_version') == 2 and raw.get('execution_backend') in {'memory_fixture', 'oxygen_demo'}:
+    if isinstance(raw, dict) and raw.get('schema_version') == 2 and raw.get('execution_backend') in {'memory_fixture', 'oxygen_demo', 'oxygen_hardware'}:
         from .dual_output_dispatcher import run_v2_cli
 
         return run_v2_cli(args)

@@ -41,6 +41,7 @@ class DualOutputDispatcher:
         self.config, self.backend, self.emit = config, backend, emit
         self.clock, self.wait, self.timeline = clock, wait, timeline
         self.outputs = config.raw['outputs']
+        self.simulated = config.raw['execution_backend'] != 'oxygen_hardware'
         self.states = {}
         self.active_profile = None
         self.active_role = None
@@ -50,16 +51,16 @@ class DualOutputDispatcher:
         self.interrupted_cycle = False
 
     def snapshot(self, event='output_states'):
-        self.emit({'event': event, 'simulated': True, 'active_profile': self.active_profile,
+        self.emit({'event': event, 'simulated': self.simulated, 'active_profile': self.active_profile,
                    'active_role': self.active_role,
                    'outputs': {role: vars(state).copy() for role, state in self.states.items()}})
 
     def context(self, role):
         spec = self.outputs[role]
-        key = spec['simulation_fixture']
+        key = spec.get('binding', spec.get('simulation_fixture'))
         discovered = self.backend.discover()
         fixture = discovered.get(key)
-        oxygen_demo = self.config.raw['execution_backend'] == 'oxygen_demo'
+        oxygen_demo = self.config.raw['execution_backend'] in {'oxygen_demo', 'oxygen_hardware'}
         const_property = self.backend.constant_property(role) if oxygen_demo else spec['const_property']
         if oxygen_demo:
             expected = {'name': spec['channel'], 'id': self.backend.channel_id(role), 'mode': spec['mode'],
@@ -106,26 +107,28 @@ class DualOutputDispatcher:
             readings[role] = actual
         for role, actual in readings.items():
             spec = self.outputs[role]
-            self.backend.authorize(role, spec['simulation_fixture'], spec)
+            self.backend.authorize(role, spec.get('binding', spec.get('simulation_fixture')), spec)
             self.states[role] = OutputState(actual, self.clock(), 'adopted_actual_readback' if actual else None)
         self.prepared = True
         self.snapshot('startup_actual_readback_no_state_restoration')
-        self.emit({'event': 'preflight_passed', 'simulated': True, 'backend': self.config.raw['execution_backend'],
-                   'physical_mapping_verified': False, 'output_enable_controlled': False})
+        self.emit({'event': 'preflight_passed', 'simulated': self.simulated, 'backend': self.config.raw['execution_backend'],
+                   'physical_mapping_verified': not self.simulated, 'output_enable_controlled': False})
 
     def sample(self, name, *, max_age=None):
         sample = self.backend.measure(name)
         limit = self.config.raw['interlocks']['max_feedback_age_s'] if max_age is None else max_age
         age = self.clock() - sample.sampled_at
-        if not sample.simulated or not sample.source.startswith('FAKE ') or not 0 <= age <= limit:
-            raise RuntimeError(f'Missing/stale/untrusted independent fixture sample: {name}, age={age}')
+        trusted = (sample.simulated is self.simulated and
+                   sample.source.startswith('FAKE ' if self.simulated else 'OXYGEN '))
+        if not trusted or not 0 <= age <= limit:
+            raise RuntimeError(f'Missing/stale/untrusted independent feedback sample: {name}, age={age}')
         kind = self.config.raw['measurement_roles'][name]['kind']
         if kind == 'boolean' and type(sample.value) is not bool:
             raise RuntimeError(f'{name} must be Boolean')
         if kind == 'number':
             number(sample.value, name, -1000, 1000)
         self.emit({'event': 'independent_feedback', 'name': name, 'value': sample.value,
-                   'age_s': age, 'source': sample.source, 'simulated': True})
+                   'age_s': age, 'source': sample.source, 'simulated': self.simulated})
         return sample.value
 
     def require_true(self, name):
@@ -187,13 +190,13 @@ class DualOutputDispatcher:
         spec = self.outputs[role]
         value = number(value, 'setpoint', spec['min_aout_v'], spec['max_aout_v'])
         self.context(role)
-        self.emit({'event': 'write_attempt', 'simulated': True, 'output': role, 'requested_v': value,
+        self.emit({'event': 'write_attempt', 'simulated': self.simulated, 'output': role, 'requested_v': value,
                    'owner': self.active_profile})
         self.backend.write(role, value)
         self.verify(role, value)
         self.states[role].value = value
         self.states[role].held_by = self.active_profile if value != spec.get('neutral_aout_v', 0) else None
-        self.emit({'event': 'setpoint_ack', 'simulated': True, 'output': role, 'readback_v': value})
+        self.emit({'event': 'setpoint_ack', 'simulated': self.simulated, 'output': role, 'readback_v': value})
 
     def compile(self, profile):
         value, elapsed = self.states[profile.output].value, 0.0
@@ -249,7 +252,7 @@ class DualOutputDispatcher:
                                 sent.add(index)
                                 self.emit({'event': 'checkpoint', 'profile': profile.name, 'name': checkpoint,
                                            'local_marker_only': True, 'marker_enabled': self.config.raw['recording']['markers']})
-                    self.emit({**record, 'profile': profile.name, 'output': role, 'simulated': True})
+                    self.emit({**record, 'profile': profile.name, 'output': role, 'simulated': self.simulated})
 
                 def guard(value):
                     self.verify(role)
@@ -280,7 +283,7 @@ class DualOutputDispatcher:
             self.completed += 1
             self.interrupted_cycle = False
             self.emit({'event': 'pattern_cycle_complete', 'assignment': name, 'profile': profile.name,
-                       'output': role, 'completion': profile.completion['mode'], 'simulated': True, **result})
+                       'output': role, 'completion': profile.completion['mode'], 'simulated': self.simulated, **result})
             self.snapshot('profile_completion_state')
         except BaseException:
             self.snapshot('profile_interrupted_state')
@@ -337,7 +340,7 @@ class DualOutputDispatcher:
         try:
             self.context(MOTOR)
             self.command(MOTOR, self.outputs[MOTOR]['neutral_aout_v'])
-            self.emit({'event': 'motor_neutral_verified', 'simulated': True})
+            self.emit({'event': 'motor_neutral_verified', 'simulated': self.simulated})
         except (Exception, KeyboardInterrupt) as exc:
             self.states[MOTOR].status = 'unknown'
             safe = False
@@ -345,7 +348,7 @@ class DualOutputDispatcher:
         try:
             self.verify(SUPPLY)
             self.emit({'event': 'supply_demand_preserved', 'value_v': self.states[SUPPLY].value,
-                       'not_power_off': True, 'simulated': True})
+                       'not_power_off': True, 'simulated': self.simulated})
         except (Exception, KeyboardInterrupt) as exc:
             self.states[SUPPLY].status = 'unknown'
             safe = False
@@ -377,23 +380,34 @@ class DualOutputDispatcher:
                 self.backend.close()
         self.emit({'event': 'dispatcher_summary', 'schema_version': 2, 'backend': self.config.raw['execution_backend'],
                    'status': status, 'started_cycles': self.started, 'completed_cycles': self.completed,
-                   'physical_actuation': False, 'supply_output_enable_controlled': False,
+                   'physical_actuation': not self.simulated and getattr(self.backend, 'writes_attempted', 0) > 0,
+                   'supply_output_enable_controlled': False,
                    'output_states': {role: vars(state).copy() for role, state in self.states.items()},
-                   'physical_bus_state': 'not established by simulation'})
+                   'physical_bus_state': 'not established by simulation' if self.simulated else 'not inferred from AOUT setpoints'})
         return code
 
 
 def run_v2_cli(args):
     config = load_v2_config(args.bindings)
     backend_name = config.raw['execution_backend']
-    if args.live:
-        raise ValueError('Live mode is locked; v2 has no physical output backend')
-    if backend_name == 'oxygen_demo' and getattr(args, 'scenario', None):
-        raise ValueError('OXYGEN demo uses UI buttons; --scenario is memory_fixture only')
+    hardware = backend_name == 'oxygen_hardware'
+    if not hardware and (getattr(args, 'confirm_physical_output', []) or getattr(args, 'confirm_hardware_interlocks', False)):
+        raise ValueError('Physical confirmations require the explicit oxygen_hardware backend')
+    if args.live and not hardware:
+        raise ValueError('--live requires execution_backend oxygen_hardware; simulation backends stay locked')
+    if backend_name != 'memory_fixture' and getattr(args, 'scenario', None):
+        raise ValueError('OXYGEN backends use real DOUT buttons; --scenario is memory_fixture only')
     triggers = {a['name']: a['trigger'] for a in config.raw['assignments'] if a.get('enabled', True)}
     events = load_scenario(args.scenario, config.raw['measurement_roles'], triggers.values()) if getattr(args, 'scenario', None) else []
     if args.execute:
-        if not args.confirm_simulated_output:
+        if hardware:
+            from .hardware_schema import confirm_hardware_outputs
+
+            if args.confirm_simulated_output or getattr(args, 'confirm_demo_output', []):
+                raise ValueError('Hardware execution cannot use simulated/demo output confirmations')
+            confirm_hardware_outputs(config, getattr(args, 'confirm_physical_output', []), live=args.live,
+                                     interlocks_confirmed=getattr(args, 'confirm_hardware_interlocks', False))
+        elif not args.confirm_simulated_output:
             raise ValueError('Execution requires --confirm-simulated-output')
         if backend_name == 'memory_fixture' and not getattr(args, 'scenario', None):
             raise ValueError('Fixture execution requires an explicit --scenario')
@@ -403,13 +417,17 @@ def run_v2_cli(args):
             confirm_demo_outputs(config.raw['outputs'], getattr(args, 'confirm_demo_output', []))
     plan = {'event': 'dispatcher_v2_plan', 'schema_version': 2, 'backend': backend_name,
             'fake_outputs_and_measurements': backend_name == 'memory_fixture', 'physical_actuation': False,
-            'oxygen_demo_io': backend_name == 'oxygen_demo', 'bus_feedback': 'FAKE independent injected sensor',
+            'physical_actuation_requested': hardware and args.execute,
+            'oxygen_demo_io': backend_name == 'oxygen_demo',
+            'bus_feedback': 'real independent OXYGEN measurement' if hardware else 'FAKE independent injected sensor',
             'scenario_events': len(events), 'assignments': [{'name': name, 'trigger': triggers[name], 'output': p.output,
             'completion': p.completion, 'profile': str(p.path)} for name, p in config.profiles.items()]}
     if not args.execute:
         print(json.dumps({**plan, 'connected': False, 'writes_attempted': 0}, indent=2, allow_nan=False))
         return 0
-    default_log = 'logs/dispatcher-v2-fixture.jsonl' if backend_name == 'memory_fixture' else 'logs/dispatcher-v2-oxygen-demo.jsonl'
+    default_log = {'memory_fixture': 'logs/dispatcher-v2-fixture.jsonl',
+                   'oxygen_demo': 'logs/dispatcher-v2-oxygen-demo.jsonl',
+                   'oxygen_hardware': 'logs/dispatcher-v2-hardware.jsonl'}[backend_name]
     path = Path(args.log_file or default_log).resolve()
     protected = {config.path} | {p.path for p in config.profiles.values()}
     if getattr(args, 'scenario', None):
@@ -438,7 +456,12 @@ def run_v2_cli(args):
                 raise
 
         emit(plan)
-        if backend_name == 'oxygen_demo':
+        if hardware:
+            from .oxygen_hardware_backend import OxygenHardwareBackend
+
+            backend = OxygenHardwareBackend(config, emit, confirmed_outputs=args.confirm_physical_output,
+                                            live=args.live, interlocks_confirmed=args.confirm_hardware_interlocks)
+        elif backend_name == 'oxygen_demo':
             from .oxygen_demo_backend import OxygenDemoBackend
 
             backend = OxygenDemoBackend(config, emit, confirmed_outputs=args.confirm_demo_output)

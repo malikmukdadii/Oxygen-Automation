@@ -28,8 +28,8 @@ class AoutDiagnosticTransport(ScpiTransport):
 
 def run_aout_diagnostic(args):
     config = load_v2_config(args.bindings)
-    if config.raw['execution_backend'] != 'oxygen_demo':
-        raise ValueError('Use an oxygen_demo V2 configuration for SCPI discovery; memory_fixture stays offline')
+    if config.raw['execution_backend'] not in {'oxygen_demo', 'oxygen_hardware'}:
+        raise ValueError('Use an oxygen_demo or oxygen_hardware V2 configuration for SCPI discovery; memory_fixture stays offline')
     connection = config.raw['connection']
     transport = AoutDiagnosticTransport(host=connection['host'], port=connection['port'],
                                         timeout_s=connection['timeout_s'])

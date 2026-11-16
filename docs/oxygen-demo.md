@@ -5,6 +5,9 @@ The OXYGEN-demo bridge subsequently passed 69 targeted mock/v2 tests. That estab
 integration, not successful writes to the second AO in actual OXYGEN. The next trial is in the
 operator's local OXYGEN simulated setup; no additional memory demo is a prerequisite.
 
+For real equipment, this demo procedure is not the hardware execution path. Use the separate
+[hardware open-loop guide](hardware-open-loop.md), configuration and physical-output confirmations.
+
 ## What connects
 
 `dispatcher.v2.oxygen-demo.json` selects backend `oxygen_demo` and TCP `127.0.0.1:10001`.

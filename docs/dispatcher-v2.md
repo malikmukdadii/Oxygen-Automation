@@ -1,5 +1,11 @@
 # Dual-role dispatcher v2
 
+**Physical-output addition:** [the hardware open-loop guide](hardware-open-loop.md) documents
+the new separately authorized `oxygen_hardware` backend with real measured interlocks and
+explicitly physical profiles. The historical simulation-only implementation described below
+and the demo backend retain their original safety gates; neither becomes a physical backend
+by changing a flag or using a simulated-channel name.
+
 **Current status:** the operator reported 56 v2 tests passing and successful completion of the
 memory demo. An added OXYGEN simulated-I/O bridge passed 69 targeted mock/v2 tests. For interactive
 testing in OXYGEN now, use [the OXYGEN-demo guide](oxygen-demo.md). The historical fixture-only
