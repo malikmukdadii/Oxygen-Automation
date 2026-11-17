@@ -270,10 +270,12 @@ def test_tcp_numeric_comparison_configures_only_once(server):
         commands.append(command)
         if command.endswith(',"DO_Value"'):
             count += 1
+            server._relative_time_origin -= 0.002
             server.set_do('DO 3/1 Sim', count >= 2)
 
     server._on_command = on_command
-    status, diagnostic, records = run_diagnostic(server, compare_numeric=True)
+    status, diagnostic, records = run_diagnostic(
+        server, compare_numeric=True, duration_s=.25, interval_s=.015)
     assert status == 0
     assert diagnostic.summary['property_presses'] == 1
     assert diagnostic.summary['numeric_presses'] == 1
@@ -505,13 +507,12 @@ def test_unknown_channel_and_unlisted_property_fail_closed(server):
         assert any(r['event'] == 'diagnostic_error' for r in records)
 
 
-def test_cli_bypasses_engine_and_records_jsonl(server, monkeypatch, tmp_path, capsys):
-    module = importlib.import_module('oxygen_engine.main')
-    monkeypatch.setattr(module, '_make_engine', lambda args: pytest.fail('Engine must not be constructed'))
+def test_cli_bypasses_engine_and_records_jsonl(server, tmp_path, capsys):
     path = tmp_path / 'watch.jsonl'
+    # watch-do is isolated: no AutomationEngine / --config path.
     assert main(['watch-do', '--channel', 'DO 3/1 Sim', '--port', str(server.bound_port),
                  '--duration', '.04', '--interval-ms', '5', '--max-gap-ms', '1000',
-                 '--log-file', str(path), '--config', 'does-not-exist.json', '--live',
+                 '--log-file', str(path), '--live',
                  '--console', 'events', '--status-interval', '0']) == 0
     rows = [json.loads(line) for line in path.read_text().splitlines()]
     assert rows[-1]['event'] == 'summary'

@@ -22,11 +22,9 @@ dist/
 logs/
 *.log
 
-# Machine-specific settings; commit example files instead
+# Machine-specific operator config; commit dispatcher.example.json + examples/ instead
 /config.json
 /dispatcher.json
-/dispatcher.v2.oxygen-demo.json
-/dispatcher.v2.my-machine.json
 *.local.json
 
 # Secrets and local backups

@@ -77,12 +77,12 @@
   "recording": {"enabled": false, "markers": true},
   "instruments": {"rzxa": {"adapter": "disabled", "enable_output_control": false}},
   "assignments": [
-    {"name": "rzxa_to_40_hold", "enabled": true, "trigger": "Ramp Enable", "output": "rzxa_voltage_demand", "profile": "profiles/rzxa_ramp_hold.json"},
-    {"name": "rzxa_down", "enabled": true, "trigger": "Ramp Disable", "output": "rzxa_voltage_demand", "profile": "profiles/rzxa_ramp_down.json"},
-    {"name": "motor_gentle", "enabled": true, "trigger": "Motor Gentle", "output": "vesc_throttle", "profile": "profiles/motor_gentle.json"},
-    {"name": "motor_stop_go", "enabled": false, "trigger": "Motor Stop Go", "output": "vesc_throttle", "profile": "profiles/motor_stop_go.json"},
-    {"name": "motor_cruise", "enabled": false, "trigger": "Motor Cruise", "output": "vesc_throttle", "profile": "profiles/motor_cruise.json"},
-    {"name": "motor_repeat", "enabled": false, "trigger": "Motor Repeat", "output": "vesc_throttle", "profile": "profiles/motor_repeat.json"}
+    {"name": "rzxa_to_40_hold", "enabled": true, "trigger": "Ramp Enable", "output": "rzxa_voltage_demand", "profile": "../profiles/rzxa_ramp_hold.json"},
+    {"name": "rzxa_down", "enabled": true, "trigger": "Ramp Disable", "output": "rzxa_voltage_demand", "profile": "../profiles/rzxa_ramp_down.json"},
+    {"name": "motor_gentle", "enabled": true, "trigger": "Motor Gentle", "output": "vesc_throttle", "profile": "../profiles/motor_gentle.json"},
+    {"name": "motor_stop_go", "enabled": false, "trigger": "Motor Stop Go", "output": "vesc_throttle", "profile": "../profiles/motor_stop_go.json"},
+    {"name": "motor_cruise", "enabled": false, "trigger": "Motor Cruise", "output": "vesc_throttle", "profile": "../profiles/motor_cruise.json"},
+    {"name": "motor_repeat", "enabled": false, "trigger": "Motor Repeat", "output": "vesc_throttle", "profile": "../profiles/motor_repeat.json"}
   ],
   "simulation": {}
 }

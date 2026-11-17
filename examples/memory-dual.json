@@ -1,7 +1,7 @@
 {
   "schema_version": 3,
   "control": {"mode": "open_loop"},
-  "transport": "oxygen_scpi",
+  "transport": "memory",
   "live_control": {
     "enable_physical_aout": false,
     "enable_rzxa_output_toggle": false,
@@ -12,15 +12,15 @@
   "outputs": {
     "rzxa_voltage_demand": {
       "role": "supply_voltage_demand",
-      "channel": "Test Aout2",
-      "display_name": "RZ-XA voltage demand (simulated)",
+      "channel": null,
+      "display_name": "Supply demand (memory fixture)",
       "expected_id": null,
       "channel_discovery_required": true,
-      "binding": "oxygen_demo_supply",
+      "binding": "supply_demand_fixture",
       "authorization": {"simulation": true, "physical": false},
       "mode": "ConstOutput",
-      "source": "DISCOVER_CONSTANT",
-      "const_property": "auto",
+      "source": "CONST0",
+      "const_property": "TRION/SourceChannel_A_CONST/Const0",
       "min_aout_v": 0.0,
       "max_aout_v": 0.5,
       "startup_aout_v": 0.0,
@@ -40,15 +40,15 @@
     },
     "vesc_throttle": {
       "role": "motor_throttle",
-      "channel": "Test Aout1",
-      "display_name": "VESC throttle (simulated)",
+      "channel": null,
+      "display_name": "Motor throttle (memory fixture)",
       "expected_id": null,
       "channel_discovery_required": true,
-      "binding": "oxygen_demo_motor",
+      "binding": "motor_throttle_fixture",
       "authorization": {"simulation": true, "physical": false},
       "mode": "ConstOutput",
-      "source": "DISCOVER_CONSTANT",
-      "const_property": "auto",
+      "source": "CONST0",
+      "const_property": "TRION/SourceChannel_A_CONST/Const0",
       "min_aout_v": 0.0,
       "max_aout_v": 0.4,
       "neutral_aout_v": 0.0,
@@ -60,7 +60,7 @@
       "on_shutdown": "return_neutral"
     }
   },
-  "timing": {"poll_ms": 50, "max_trigger_gap_ms": 500, "interval_ms": 150, "max_lateness_ms": 500},
+  "timing": {"poll_ms": 50, "max_trigger_gap_ms": 250, "interval_ms": 100, "max_lateness_ms": 250},
   "measurements": {},
   "interlocks": {
     "motor_supply_demand_v": 0.5,
@@ -72,16 +72,29 @@
   "recording": {"enabled": false, "markers": true},
   "instruments": {"rzxa": {"adapter": "disabled", "enable_output_control": false}},
   "assignments": [
-    {"name": "rzxa_to_40_hold", "enabled": true, "trigger": "Ramp Enable", "output": "rzxa_voltage_demand", "profile": "profiles/rzxa_ramp_hold.json"},
-    {"name": "rzxa_down", "enabled": true, "trigger": "Ramp Disable", "output": "rzxa_voltage_demand", "profile": "profiles/rzxa_ramp_down.json"},
-    {"name": "rzxa_steps", "enabled": true, "trigger": "RZXA Char", "output": "rzxa_voltage_demand", "profile": "profiles/rzxa_steps.json"},
-    {"name": "motor_gentle", "enabled": true, "trigger": "Motor Gentle", "output": "vesc_throttle", "profile": "profiles/motor_gentle.json"},
-    {"name": "motor_stop_go", "enabled": true, "trigger": "Motor Stop Go", "output": "vesc_throttle", "profile": "profiles/motor_stop_go.json"},
-    {"name": "motor_cruise", "enabled": true, "trigger": "Motor Cruise", "output": "vesc_throttle", "profile": "profiles/motor_cruise.json"}
+    {"name": "rzxa_to_40_hold", "enabled": true, "trigger": "DO 3/1 Sim", "output": "rzxa_voltage_demand", "profile": "../profiles/rzxa_ramp_hold.json"},
+    {"name": "rzxa_down", "enabled": true, "trigger": "DO 3/2 Sim", "output": "rzxa_voltage_demand", "profile": "../profiles/rzxa_ramp_down.json"},
+    {"name": "rzxa_steps", "enabled": true, "trigger": "DO 3/3 Sim", "output": "rzxa_voltage_demand", "profile": "../profiles/rzxa_steps.json"},
+    {"name": "motor_gentle", "enabled": true, "trigger": "DO 3/4 Sim", "output": "vesc_throttle", "profile": "../profiles/motor_gentle.json"},
+    {"name": "motor_stop_go", "enabled": true, "trigger": "DO 3/5 Sim", "output": "vesc_throttle", "profile": "../profiles/motor_stop_go.json"},
+    {"name": "motor_cruise", "enabled": true, "trigger": "DO 3/6 Sim", "output": "vesc_throttle", "profile": "../profiles/motor_cruise.json"}
   ],
   "simulation": {
-    "namespace": "OXYGEN_SIMULATED_IO_FAKE_TELEMETRY",
-    "outputs": {},
+    "namespace": "FAKE_IN_PROCESS_ONLY",
+    "outputs": {
+      "supply_demand_fixture": {
+        "name": "FAKE supply analog demand",
+        "id": "101",
+        "mode": "ConstOutput", "source": "CONST0", "property": "TRION/SourceChannel_A_CONST/Const0",
+        "unit": "V", "min_v": 0.0, "max_v": 0.5, "initial_v": 0.0
+      },
+      "motor_throttle_fixture": {
+        "name": "FAKE motor throttle",
+        "id": "102",
+        "mode": "ConstOutput", "source": "CONST0", "property": "TRION/SourceChannel_A_CONST/Const0",
+        "unit": "V", "min_v": 0.0, "max_v": 0.4, "initial_v": 0.0
+      }
+    },
     "sample_interval_s": 0.1,
     "streaming": true,
     "telemetry": {}

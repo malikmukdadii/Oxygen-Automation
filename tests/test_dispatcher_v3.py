@@ -16,9 +16,10 @@ from oxygen_engine.memory_backend import MemoryBackend
 from oxygen_engine.schema import ConfigError, confirm_outputs, load_dispatcher_config
 
 ROOT = Path(__file__).resolve().parents[1]
-EXAMPLE = ROOT / 'dispatcher.v3.example.json'
-HARDWARE = ROOT / 'dispatcher.v3.hardware.example.json'
-DEMO = ROOT / 'dispatcher.v3.oxygen-demo.example.json'
+EXAMPLE = ROOT / 'dispatcher.example.json'
+HARDWARE = ROOT / 'examples' / 'physical-dual.json'
+DEMO = ROOT / 'examples' / 'oxygen-demo.json'
+SUPPLY_ONLY = ROOT / 'examples' / 'supply-only.json'
 SCENARIO = ROOT / 'scenarios' / 'open_loop_fixture_demo.json'
 
 
@@ -414,6 +415,20 @@ def test_physical_execution_requires_live(monkeypatch):
     ]) == 1
 
 
+def test_cli_defaults_to_dispatcher_json_or_example(monkeypatch, capsys):
+    monkeypatch.setattr(socket, 'create_connection', lambda *a, **k: pytest.fail('must not connect'))
+    # With no local dispatcher.json, default bindings resolve to dispatcher.example.json.
+    assert main(['dispatch-patterns']) == 0
+    plan = json.loads(capsys.readouterr().out)
+    assert plan['schema_version'] == 3
+    assert plan['control_mode'] == 'open_loop'
+
+
+def test_legacy_global_config_flag_is_retired():
+    with pytest.raises(SystemExit, match='--config is retired'):
+        main(['--config', 'examples/legacy-engine-config.json', 'list-profiles'])
+
+
 def _supply_only_profile(tmp_path):
     profile = {
         'schema_version': 3,
@@ -679,9 +694,6 @@ def test_supply_only_rejects_explicit_motor_neutral_prerequisite(tmp_path):
     path.write_text(json.dumps(raw), encoding='utf-8')
     with pytest.raises(ConfigError, match='motor_neutral'):
         load_dispatcher_config(path)
-
-
-SUPPLY_ONLY = ROOT / 'dispatcher.v3.supply-only.example.json'
 
 
 def test_stock_rzxa_profiles_load_and_run_supply_only():

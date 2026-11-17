@@ -5,29 +5,52 @@ Simulated and physical ConstOutput channels share one discovery, timeline, SCPI 
 
 **Verified scale:** 1.000 V AOUT = 80 V bus (`gain_bus_v_per_aout_v: 80`).
 
+## Operator config
+
+Authoritative runtime file: **`dispatcher.json`** (gitignored; machine-specific).
+
+```powershell
+Copy-Item dispatcher.example.json dispatcher.json
+# Edit channel names, triggers, active roles, and limits for this machine.
+```
+
+Illustrative variants live under `examples/` and must not be confused with the active operator file.
+
+| File | Purpose |
+|------|---------|
+| `dispatcher.json` | Active operator config (local only) |
+| `dispatcher.example.json` | Committed starter (memory dual-output) |
+| `examples/memory-dual.json` | Offline dual-output fixture |
+| `examples/supply-only.json` | Supply-only RZ-XA commissioning |
+| `examples/oxygen-demo.json` | Simulated OXYGEN demo |
+| `examples/physical-dual.json` | Physical dual-output template |
+| `profiles/` | Shared profile library |
+
 ## Workflow
 
 ```powershell
 python -m venv .venv-scpi
 .\.venv-scpi\Scripts\python.exe -m pip install -r requirements.txt
 
-# Offline validate (no sockets)
-.\.venv-scpi\Scripts\python.exe -m oxygen_engine dispatch-patterns --bindings dispatcher.v3.example.json
+# Offline validate active/default config
+.\.venv-scpi\Scripts\python.exe -m oxygen_engine dispatch-patterns
 
-# Supply-only (stock RZ-XA profiles; no VESC role)
-.\.venv-scpi\Scripts\python.exe -m oxygen_engine dispatch-patterns --bindings dispatcher.v3.supply-only.example.json
+# Supply-only example
+.\.venv-scpi\Scripts\python.exe -m oxygen_engine dispatch-patterns --bindings examples/supply-only.json
 
 # Memory scenario
-.\.venv-scpi\Scripts\python.exe -m oxygen_engine dispatch-patterns --bindings dispatcher.v3.example.json --execute --confirm-simulated-output --scenario scenarios/open_loop_fixture_demo.json
+.\.venv-scpi\Scripts\python.exe -m oxygen_engine dispatch-patterns --bindings examples/memory-dual.json --execute --confirm-simulated-output --scenario scenarios/open_loop_fixture_demo.json
 
-# Simulated OXYGEN (confirm exact channel names; --live not used)
-.\.venv-scpi\Scripts\python.exe -m oxygen_engine dispatch-patterns --bindings dispatcher.v3.oxygen-demo.example.json --execute --confirm-simulated-output --confirm-output "Test Aout2" --confirm-output "Test Aout1"
+# Simulated OXYGEN
+.\.venv-scpi\Scripts\python.exe -m oxygen_engine dispatch-patterns --bindings examples/oxygen-demo.json --execute --confirm-simulated-output --confirm-output "Test Aout2" --confirm-output "Test Aout1"
 
-# Physical open-loop (single --live ack + confirm both AOUT names)
-.\.venv-scpi\Scripts\python.exe -m oxygen_engine dispatch-patterns --bindings dispatcher.v3.hardware.example.json --execute --live --confirm-output "Test Aout2" --confirm-output "Test Aout1"
+# Physical open-loop
+.\.venv-scpi\Scripts\python.exe -m oxygen_engine dispatch-patterns --bindings dispatcher.json --execute --live --confirm-output "RZ-XA Demand" --confirm-output "VESC Throttle"
 
-# Read-only AOUT discovery
-.\.venv-scpi\Scripts\python.exe -m oxygen_engine discover-aout --bindings dispatcher.v3.oxygen-demo.example.json
+# Read-only tools (isolated; no AutomationEngine)
+.\.venv-scpi\Scripts\python.exe -m oxygen_engine discover-aout --bindings examples/oxygen-demo.json
+.\.venv-scpi\Scripts\python.exe -m oxygen_engine watch-do --channel "DO 3/1 Sim"
+.\.venv-scpi\Scripts\python.exe -m oxygen_engine list-profiles
 ```
 
 ## Control model

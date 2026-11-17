@@ -54,9 +54,9 @@
   "recording": {"enabled": false, "markers": true},
   "instruments": {"rzxa": {"adapter": "disabled", "enable_output_control": false}},
   "assignments": [
-    {"name": "rzxa_to_40_hold", "enabled": true, "trigger": "DO 3/1 Sim", "output": "rzxa_voltage_demand", "profile": "profiles/rzxa_ramp_hold.json"},
-    {"name": "rzxa_down", "enabled": true, "trigger": "DO 3/2 Sim", "output": "rzxa_voltage_demand", "profile": "profiles/rzxa_ramp_down.json"},
-    {"name": "rzxa_steps", "enabled": true, "trigger": "DO 3/3 Sim", "output": "rzxa_voltage_demand", "profile": "profiles/rzxa_steps.json"}
+    {"name": "rzxa_to_40_hold", "enabled": true, "trigger": "DO 3/1 Sim", "output": "rzxa_voltage_demand", "profile": "../profiles/rzxa_ramp_hold.json"},
+    {"name": "rzxa_down", "enabled": true, "trigger": "DO 3/2 Sim", "output": "rzxa_voltage_demand", "profile": "../profiles/rzxa_ramp_down.json"},
+    {"name": "rzxa_steps", "enabled": true, "trigger": "DO 3/3 Sim", "output": "rzxa_voltage_demand", "profile": "../profiles/rzxa_steps.json"}
   ],
   "simulation": {
     "namespace": "FAKE_IN_PROCESS_ONLY",
