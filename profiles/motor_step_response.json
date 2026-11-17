@@ -1,0 +1,120 @@
+{
+  "schema_version": 3,
+  "name": "motor_step_response",
+  "description": "One-shot throttle level characterization for DC bus current/power, speed and transient response. Supply AOUT unchanged; return to neutral. Requires separately commissioned motor limits.",
+  "output": "vesc_throttle",
+  "timeout_s": 50,
+  "completion": {
+    "mode": "return_neutral",
+    "value": 0.0
+  },
+  "requires": {
+    "motor_neutral": true,
+    "motor_enable": "operator_verified"
+  },
+  "steps": [
+    {
+      "type": "assert_preconditions",
+      "params": {
+        "motor_neutral": true
+      }
+    },
+    {
+      "type": "set_aout",
+      "params": {
+        "channel": "vesc_throttle",
+        "value": 0.0
+      }
+    },
+    {
+      "type": "ramp_aout",
+      "params": {
+        "channel": "vesc_throttle",
+        "target": 0.1,
+        "duration_s": 2.0
+      }
+    },
+    {
+      "type": "hold",
+      "params": {
+        "duration_s": 3.0
+      }
+    },
+    {
+      "type": "ramp_aout",
+      "params": {
+        "channel": "vesc_throttle",
+        "target": 0.2,
+        "duration_s": 2.0
+      }
+    },
+    {
+      "type": "hold",
+      "params": {
+        "duration_s": 4.0
+      }
+    },
+    {
+      "type": "ramp_aout",
+      "params": {
+        "channel": "vesc_throttle",
+        "target": 0.35,
+        "duration_s": 2.0
+      }
+    },
+    {
+      "type": "hold",
+      "params": {
+        "duration_s": 4.0
+      }
+    },
+    {
+      "type": "ramp_aout",
+      "params": {
+        "channel": "vesc_throttle",
+        "target": 0.0,
+        "duration_s": 4.0
+      }
+    },
+    {
+      "type": "hold",
+      "params": {
+        "duration_s": 5.0
+      }
+    },
+    {
+      "type": "ramp_aout",
+      "params": {
+        "channel": "vesc_throttle",
+        "target": 0.25,
+        "duration_s": 2.0
+      }
+    },
+    {
+      "type": "hold",
+      "params": {
+        "duration_s": 3.0
+      }
+    },
+    {
+      "type": "ramp_aout",
+      "params": {
+        "channel": "vesc_throttle",
+        "target": 0.0,
+        "duration_s": 3.0
+      }
+    },
+    {
+      "type": "return_neutral",
+      "params": {
+        "channel": "vesc_throttle"
+      }
+    },
+    {
+      "type": "checkpoint",
+      "params": {
+        "name": "motor_step_response_complete"
+      }
+    }
+  ]
+}
