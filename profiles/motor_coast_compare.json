@@ -1,0 +1,31 @@
+{
+  "schema_version": 3,
+  "name": "motor_coast_compare",
+  "description": "Two 0.25 V demand trials with 1 s versus 5 s release ramps and 10 s neutral observation windows. Compare measured CAN speed decay and electrical power, not commanded speed. No brake command; neutral coasting depends on the commissioned VESC configuration. Not evidence of regenerative braking or stopped motion.",
+  "output": "vesc_throttle",
+  "timeout_s": 65,
+  "completion": {"mode": "return_neutral", "value": 0.0},
+  "requires": {"motor_neutral": true, "motor_enable": "operator_verified"},
+  "steps": [
+    {"type": "assert_preconditions", "params": {"motor_neutral": true}},
+    {"type": "checkpoint", "params": {"name": "fast_release_trial_start"}},
+    {"type": "ramp_aout", "params": {"channel": "vesc_throttle", "target": 0.25, "duration_s": 4.0}},
+    {"type": "checkpoint", "params": {"name": "fast_release_025_v_plateau"}},
+    {"type": "hold", "params": {"duration_s": 5.0}},
+    {"type": "checkpoint", "params": {"name": "fast_release_begin"}},
+    {"type": "ramp_aout", "params": {"channel": "vesc_throttle", "target": 0.0, "duration_s": 1.0}},
+    {"type": "return_neutral", "params": {"channel": "vesc_throttle"}},
+    {"type": "checkpoint", "params": {"name": "fast_release_neutral_observation"}},
+    {"type": "hold", "params": {"duration_s": 10.0}},
+    {"type": "checkpoint", "params": {"name": "slow_release_trial_start"}},
+    {"type": "ramp_aout", "params": {"channel": "vesc_throttle", "target": 0.25, "duration_s": 4.0}},
+    {"type": "checkpoint", "params": {"name": "slow_release_025_v_plateau"}},
+    {"type": "hold", "params": {"duration_s": 5.0}},
+    {"type": "checkpoint", "params": {"name": "slow_release_begin"}},
+    {"type": "ramp_aout", "params": {"channel": "vesc_throttle", "target": 0.0, "duration_s": 5.0}},
+    {"type": "return_neutral", "params": {"channel": "vesc_throttle"}},
+    {"type": "checkpoint", "params": {"name": "slow_release_neutral_observation"}},
+    {"type": "hold", "params": {"duration_s": 10.0}},
+    {"type": "checkpoint", "params": {"name": "coast_comparison_complete"}}
+  ]
+}

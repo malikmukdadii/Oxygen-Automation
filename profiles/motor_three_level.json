@@ -1,0 +1,116 @@
+{
+  "schema_version": 3,
+  "name": "motor_three_level",
+  "description": "Gentle three-plateau throttle characterization: 0.12, 0.20, 0.28 V. Compares speed, DC power and phase current; no brake command.",
+  "output": "vesc_throttle",
+  "timeout_s": 45,
+  "completion": {
+    "mode": "return_neutral",
+    "value": 0.0
+  },
+  "requires": {
+    "motor_neutral": true,
+    "motor_enable": "operator_verified"
+  },
+  "steps": [
+    {
+      "type": "assert_preconditions",
+      "params": {
+        "motor_neutral": true
+      }
+    },
+    {
+      "type": "set_aout",
+      "params": {
+        "channel": "vesc_throttle",
+        "value": 0.0
+      }
+    },
+    {
+      "type": "ramp_aout",
+      "params": {
+        "channel": "vesc_throttle",
+        "target": 0.12,
+        "duration_s": 3
+      }
+    },
+    {
+      "type": "hold",
+      "params": {
+        "duration_s": 4
+      }
+    },
+    {
+      "type": "checkpoint",
+      "params": {
+        "name": "plateau_012_end"
+      }
+    },
+    {
+      "type": "ramp_aout",
+      "params": {
+        "channel": "vesc_throttle",
+        "target": 0.2,
+        "duration_s": 3
+      }
+    },
+    {
+      "type": "hold",
+      "params": {
+        "duration_s": 4
+      }
+    },
+    {
+      "type": "checkpoint",
+      "params": {
+        "name": "plateau_020_end"
+      }
+    },
+    {
+      "type": "ramp_aout",
+      "params": {
+        "channel": "vesc_throttle",
+        "target": 0.28,
+        "duration_s": 3
+      }
+    },
+    {
+      "type": "hold",
+      "params": {
+        "duration_s": 4
+      }
+    },
+    {
+      "type": "checkpoint",
+      "params": {
+        "name": "plateau_028_end"
+      }
+    },
+    {
+      "type": "ramp_aout",
+      "params": {
+        "channel": "vesc_throttle",
+        "target": 0,
+        "duration_s": 4
+      }
+    },
+    {
+      "type": "hold",
+      "params": {
+        "duration_s": 6
+      }
+    },
+    {
+      "type": "checkpoint",
+      "params": {
+        "name": "neutral_coast_end"
+      }
+    },
+    {
+      "type": "return_neutral",
+      "params": {
+        "channel": "vesc_throttle"
+      }
+    }
+  ]
+}

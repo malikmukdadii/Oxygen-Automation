@@ -1,0 +1,75 @@
+{
+  "schema_version": 3,
+  "name": "rzxa_36_38_40_ladder",
+  "description": "RZ-XA demand staircase: ramp to 0.450 V (36 V nominal), 0.475 V (38 V), 0.500 V (40 V), hold at 0.500 V. For supply-only characterization while motor is neutral.",
+  "output": "rzxa_voltage_demand",
+  "timeout_s": 35,
+  "completion": {
+    "mode": "hold_final",
+    "value": 0.5,
+    "operator_action_required_to_stop": true
+  },
+  "requires": {},
+  "steps": [
+    {
+      "type": "ramp_aout",
+      "params": {
+        "channel": "rzxa_voltage_demand",
+        "target": 0.45,
+        "duration_s": 4
+      }
+    },
+    {
+      "type": "hold",
+      "params": {
+        "duration_s": 4
+      }
+    },
+    {
+      "type": "checkpoint",
+      "params": {
+        "name": "demand_36V"
+      }
+    },
+    {
+      "type": "ramp_aout",
+      "params": {
+        "channel": "rzxa_voltage_demand",
+        "target": 0.475,
+        "duration_s": 3
+      }
+    },
+    {
+      "type": "hold",
+      "params": {
+        "duration_s": 4
+      }
+    },
+    {
+      "type": "checkpoint",
+      "params": {
+        "name": "demand_38V"
+      }
+    },
+    {
+      "type": "ramp_aout",
+      "params": {
+        "channel": "rzxa_voltage_demand",
+        "target": 0.5,
+        "duration_s": 3
+      }
+    },
+    {
+      "type": "hold",
+      "params": {
+        "duration_s": 5
+      }
+    },
+    {
+      "type": "checkpoint",
+      "params": {
+        "name": "demand_40V"
+      }
+    }
+  ]
+}

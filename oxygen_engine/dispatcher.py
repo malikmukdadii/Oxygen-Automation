@@ -24,6 +24,30 @@ SUPPLY = 'rzxa_voltage_demand'
 MOTOR = 'vesc_throttle'
 
 
+def configuration_summary(config):
+    enabled, disabled = [], []
+    for assignment in config.raw['assignments']:
+        record = {key: assignment.get(key) for key in ('name', 'trigger', 'output', 'profile')}
+        if assignment.get('enabled', True):
+            profile = config.profiles[assignment['name']]
+            record.update(profile=str(profile.path), completion=profile.completion,
+                          nominal_duration_s=sum(step.get('params', {}).get('duration_s', 0)
+                                                 for step in profile.steps))
+            enabled.append(record)
+        else:
+            disabled.append({**record, 'reason': 'enabled=false; trigger is not polled and will not respond',
+                             'profile_validated': False})
+    return {
+        'assignments': enabled, 'disabled_assignments': disabled,
+        'output_mappings': {
+            role: {key: spec.get(key) for key in ('channel', 'display_name', 'binding', 'min_aout_v',
+                                                 'max_aout_v', 'neutral_aout_v', 'expected_id')}
+            for role, spec in config.raw['outputs'].items()
+        },
+        'trigger_policy': 'LOW then HIGH; no queue; polling pauses during profiles; pulses while busy may be missed',
+    }
+
+
 class HeldPattern(OutputPattern):
     def value_at(self, elapsed_s):
         if elapsed_s >= self.duration_s:
@@ -63,6 +87,7 @@ class Dispatcher:
 
     def snapshot(self, event='output_states'):
         self.emit({'event': event, 'simulated': not self.physical, 'active_profile': self.active_profile,
+                   'dispatcher_state': 'running' if self.active_profile else ('ready' if self.prepared else 'not_prepared'),
                    'active_role': self.active_role, 'control_mode': self.config.mode,
                    'outputs': {role: vars(state).copy() for role, state in self.states.items()}})
 
@@ -135,6 +160,11 @@ class Dispatcher:
                    'transport': self.config.transport, 'control_mode': self.config.mode,
                    'live_feedback_enabled': not self.open_loop,
                    'physical_mapping_verified': self.physical, 'output_enable_controlled': False})
+        self.emit({'event': 'dispatcher_startup_summary', 'dispatcher_state': 'ready',
+                   **configuration_summary(self.config),
+                   'resolved_outputs': {role: {'id': self.backend.channel_id(role),
+                                              'property': self.backend.constant_property(role)}
+                                        for role in self.outputs}})
 
     def sample(self, name, *, max_age=None):
         """Closed-loop / interlock sampling. Open-loop must use log_measurements() instead."""
@@ -323,16 +353,27 @@ class Dispatcher:
             require_controller()
         profile = self.config.profiles[name]
         role = profile.output
-        self.verify(role)
-        self.assert_preconditions(profile)
+        try:
+            self.verify(role)
+            self.assert_preconditions(profile)
+        except Exception as exc:
+            self.emit({'event': 'profile_precondition_failed', 'assignment': name, 'profile': profile.name,
+                       'output': role, 'error_type': type(exc).__name__, 'error': str(exc),
+                       'profile_started': False})
+            raise
         if trigger_observed is not None and not 0 <= self.clock() - trigger_observed <= self.config.raw['timing']['max_trigger_gap_ms'] / 1000:
-            self.emit({'event': 'trigger_stale', 'assignment': name, 'message': 'Precondition checks aged out the edge; no run'})
+            self.emit({'event': 'trigger_stale', 'assignment': name,
+                       'age_s': self.clock() - trigger_observed,
+                       'message': 'Precondition checks aged out the edge; no run. Apply a fresh LOW then HIGH.'})
             return
         current = self.states[role].value
         self.active_profile, self.active_role = profile.name, role
         self.started += 1
         self.interrupted_cycle = True
         self.snapshot('profile_ownership_acquired')
+        self.emit({'event': 'profile_started', 'assignment': name, 'profile': profile.name,
+                   'output': role, 'dispatcher_state': 'running', 'button_polling': 'paused',
+                   'message': 'Button edges are not observed during playback; no queue or DOUT cancel. Use independent physical stop if needed.'})
         try:
             requirements = [s.get('params', {}) for s in profile.steps if s['type'] == 'assert_preconditions']
             repeat_guard = any(p.get('current_aout_must_be_zero_or_already_target') for p in requirements)
@@ -401,7 +442,7 @@ class Dispatcher:
         assignments = [a for a in self.config.raw['assignments'] if a.get('enabled', True)]
         last_verify = self.clock()
         self.emit({'event': 'dispatcher_ready', 'transport': self.config.transport,
-                   'control_mode': self.config.mode,
+                   'control_mode': self.config.mode, 'dispatcher_state': 'ready',
                    'message': 'LOW then HIGH starts once; busy presses ignored'})
         while True:
             ready = []
@@ -412,10 +453,23 @@ class Dispatcher:
                 tracker = trackers[assignment['name']]
                 if now - began > timing['max_trigger_gap_ms'] / 1000:
                     tracker.reset()
+                    self.emit({'event': 'trigger_observation_discarded', 'assignment': assignment['name'],
+                               'trigger': assignment['trigger'], 'read_s': now - began,
+                               'message': 'DO read exceeded maximum trigger gap; resync LOW then HIGH required.'})
                     continue
                 if type(value) is not bool:
                     raise ControlError('Invalid DO level')
                 observation = tracker.observe(value, now)
+                if observation['edge'] == 'baseline':
+                    gap = observation['gap_s']
+                    if gap is not None:
+                        self.emit({'event': 'trigger_observation_discarded', 'assignment': assignment['name'],
+                                   'trigger': assignment['trigger'], 'gap_s': gap,
+                                   'message': 'Observation gap reset edge tracking; no edge inferred across missing samples.'})
+                    if value:
+                        self.emit({'event': 'trigger_not_armed', 'assignment': assignment['name'],
+                                   'trigger': assignment['trigger'],
+                                   'message': 'HIGH at baseline is not a press; set LOW then HIGH.'})
                 self.emit({'event': 'trigger_sample', 'assignment': assignment['name'], **observation})
                 if observation['edge'] != 'steady':
                     self.emit({'event': 'trigger_state', 'assignment': assignment['name'], **observation})
@@ -428,10 +482,15 @@ class Dispatcher:
                         self.emit({'event': 'trigger_ignored', 'assignment': ignored,
                                    'reason': 'config order wins; no queue'})
                     self.execute_profile(name, trigger_observed=observed)
+                else:
+                    self.emit({'event': 'trigger_stale', 'assignment': name,
+                               'age_s': self.clock() - observed,
+                               'message': 'Polling other inputs aged out this edge; no run. Apply a fresh LOW then HIGH.'})
                 for tracker in trackers.values():
                     tracker.reset()
                 last_verify = self.clock()
-                self.emit({'event': 'dispatcher_ready', 'message': 'Fresh LOW then HIGH required on every button'})
+                self.emit({'event': 'dispatcher_ready', 'dispatcher_state': 'ready',
+                           'message': 'Polling resumed. Fresh LOW then HIGH required on every button; busy pulses were not queued.'})
             elif self.clock() - last_verify >= .5:
                 for role in self.states:
                     self.verify(role)
@@ -552,11 +611,7 @@ def run_dispatch_cli(args):
             'NONE: open_loop; external protections required' if config.open_loop else
             ('real independent OXYGEN measurement' if physical else 'FAKE independent injected sensor')),
         'scenario_events': len(events),
-        'assignments': [
-            {'name': name, 'trigger': triggers[name], 'output': p.output,
-             'completion': p.completion, 'profile': str(p.path)}
-            for name, p in config.profiles.items()
-        ],
+        **configuration_summary(config),
     }
     if not args.execute:
         print(json.dumps({**plan, 'connected': False, 'writes_attempted': 0}, indent=2, allow_nan=False))

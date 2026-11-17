@@ -45,7 +45,7 @@ python -m venv .venv-scpi
 .\.venv-scpi\Scripts\python.exe -m oxygen_engine dispatch-patterns --bindings examples/oxygen-demo.json --execute --confirm-simulated-output --confirm-output "Test Aout2" --confirm-output "Test Aout1"
 
 # Physical open-loop
-.\.venv-scpi\Scripts\python.exe -m oxygen_engine dispatch-patterns --bindings dispatcher.json --execute --live --confirm-output "RZ-XA Demand" --confirm-output "VESC Throttle"
+.\.venv-scpi\Scripts\python.exe -m oxygen_engine dispatch-patterns --bindings dispatcher.json --execute --live --confirm-output "Takasago Voltage Control" --confirm-output "Drive Control"
 
 # Read-only tools (isolated; no AutomationEngine)
 .\.venv-scpi\Scripts\python.exe -m oxygen_engine discover-aout --bindings examples/oxygen-demo.json
@@ -77,6 +77,16 @@ python -m venv .venv-scpi
 | `profiles/motor_stop_go.json` | Stop/go pulses |
 | `profiles/motor_cruise.json` | Multi-level cruise |
 | `profiles/motor_repeat.json` | Repeated gentle pulses |
+| `profiles/motor_step_response.json` | Extended demand-level characterization |
+| `profiles/motor_coast_compare.json` | Matched demand trials with fast/slow release and neutral observation |
+
+See [open-loop experiments](docs/open-loop-experiments.md) for durations, suggested existing DOUT
+assignments, measurement interpretation and the inspected local enable flags. Disabled assignments
+are not polled. Startup diagnostics list both enabled and disabled entries, exact AOUT mappings and
+voltage limits. Active profiles pause DOUT polling; busy pulses can be unobservable and are not queued.
+
+[Future coordinated regeneration](docs/regenerative-extension-plan.md) is a design/commissioning
+plan only. `Braking Control` is not active; no brake role or coordinated playback is implemented.
 
 ## Tests
 

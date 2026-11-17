@@ -1,0 +1,116 @@
+{
+  "schema_version": 3,
+  "name": "motor_coastdown_comparison",
+  "description": "Two acceleration/coast-down trials (0.20 and 0.28 V) with fixed supply demand. Negative DC power is measured, not assumed; 0 V throttle is not an active regenerative brake command.",
+  "output": "vesc_throttle",
+  "timeout_s": 45,
+  "completion": {
+    "mode": "return_neutral",
+    "value": 0.0
+  },
+  "requires": {
+    "motor_neutral": true,
+    "motor_enable": "operator_verified"
+  },
+  "steps": [
+    {
+      "type": "assert_preconditions",
+      "params": {
+        "motor_neutral": true
+      }
+    },
+    {
+      "type": "set_aout",
+      "params": {
+        "channel": "vesc_throttle",
+        "value": 0.0
+      }
+    },
+    {
+      "type": "ramp_aout",
+      "params": {
+        "channel": "vesc_throttle",
+        "target": 0.2,
+        "duration_s": 3
+      }
+    },
+    {
+      "type": "hold",
+      "params": {
+        "duration_s": 4
+      }
+    },
+    {
+      "type": "ramp_aout",
+      "params": {
+        "channel": "vesc_throttle",
+        "target": 0,
+        "duration_s": 3
+      }
+    },
+    {
+      "type": "checkpoint",
+      "params": {
+        "name": "first_coast_begins"
+      }
+    },
+    {
+      "type": "hold",
+      "params": {
+        "duration_s": 6
+      }
+    },
+    {
+      "type": "checkpoint",
+      "params": {
+        "name": "first_coast_end"
+      }
+    },
+    {
+      "type": "ramp_aout",
+      "params": {
+        "channel": "vesc_throttle",
+        "target": 0.28,
+        "duration_s": 4
+      }
+    },
+    {
+      "type": "hold",
+      "params": {
+        "duration_s": 4
+      }
+    },
+    {
+      "type": "ramp_aout",
+      "params": {
+        "channel": "vesc_throttle",
+        "target": 0,
+        "duration_s": 3
+      }
+    },
+    {
+      "type": "checkpoint",
+      "params": {
+        "name": "second_coast_begins"
+      }
+    },
+    {
+      "type": "hold",
+      "params": {
+        "duration_s": 8
+      }
+    },
+    {
+      "type": "checkpoint",
+      "params": {
+        "name": "second_coast_end"
+      }
+    },
+    {
+      "type": "return_neutral",
+      "params": {
+        "channel": "vesc_throttle"
+      }
+    }
+  ]
+}
