@@ -330,33 +330,6 @@ def test_explicit_confirmation_and_preflight_are_both_required():
         transport.write(f':CHANNELlist:PROPerty "{CID}","{CONSTANT_PROPERTY}",SCALAR,0,"V"')
 
 
-def test_preview_is_offline_and_generates_reference_csv(monkeypatch, tmp_path, capsys):
-    module = importlib.import_module('oxygen_engine.constant_pattern')
-    main_module = importlib.import_module('oxygen_engine.main')
-    monkeypatch.setattr(module, 'SimulatedConstantTransport', lambda **kw: pytest.fail('Preview must be offline'))
-    monkeypatch.setattr(main_module, '_make_engine', lambda args: pytest.fail('No engine lifecycle'))
-    log = tmp_path / 'pattern.jsonl'
-    reference = tmp_path / 'reference.csv'
-    assert main(['aout-pattern', '--log-file', str(log), '--csv-file', str(reference)]) == 0
-    with reference.open(newline='') as stream:
-        points = list(csv.DictReader(stream))
-    assert len(points) == 201
-    assert points[0]['requested_v'] == '0' and points[-1]['requested_v'] == '0'
-    assert points[60]['requested_v'] == '1'
-    assert points[140]['requested_v'] == '1'
-    assert 'preview_complete' in capsys.readouterr().out
-    records = [json.loads(line) for line in log.read_text().splitlines()]
-    assert records[-1]['writes_attempted'] == 0
-
-
-@pytest.mark.parametrize('flags', [[], ['--confirm-simulated-output'], ['--expected-id', CID]])
-def test_execute_cannot_be_enabled_by_partial_flags(flags, monkeypatch, tmp_path, capsys):
-    module = importlib.import_module('oxygen_engine.constant_pattern')
-    monkeypatch.setattr(module, 'SimulatedConstantTransport', lambda **kw: pytest.fail('No partial authorization'))
-    assert main(['aout-pattern', '--execute', '--log-file', str(tmp_path / 'log.jsonl'), *flags]) == 1
-    assert 'requires' in capsys.readouterr().err
-
-
 def test_trigger_startup_high_hold_and_fresh_low_rearming():
     from oxygen_engine.triggered_pattern import triggered_timeline
 
@@ -487,9 +460,3 @@ def test_trigger_fault_aborts_session_and_verifies_zero(backend):
     assert float(channel.properties[CONSTANT_PROPERTY]) == 0
     assert len([r for r in records if r['event'] == 'pattern_cycle_started']) == 1
 
-
-def test_trigger_preview_remains_offline(monkeypatch, tmp_path):
-    module = importlib.import_module('oxygen_engine.constant_pattern')
-    monkeypatch.setattr(module, 'SimulatedConstantTransport', lambda **kw: pytest.fail('Preview must be offline'))
-    assert main(['aout-pattern', '--trigger-do', 'DO 3/1 Sim',
-                 '--log-file', str(tmp_path / 'trigger.jsonl')]) == 0

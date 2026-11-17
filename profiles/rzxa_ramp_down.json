@@ -1,0 +1,13 @@
+{
+  "schema_version": 3,
+  "name": "rzxa_ramp_down",
+  "description": "Open-loop supply-demand ramp to 0 V. Usable supply-only. When dual-output and interlocks.supply_down_requires_motor_neutral is true, motor neutral is verified before/during the ramp.",
+  "output": "rzxa_voltage_demand",
+  "timeout_s": 30,
+  "completion": {"mode": "verify_zero", "value": 0.0},
+  "requires": {},
+  "steps": [
+    {"type": "ramp_aout", "params": {"channel": "rzxa_voltage_demand", "target": 0.0, "duration_s": 5.0}},
+    {"type": "checkpoint", "params": {"name": "supply_commanded_zero"}}
+  ]
+}

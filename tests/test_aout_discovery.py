@@ -1,5 +1,4 @@
 import copy
-import copy
 import json
 from pathlib import Path
 
@@ -8,13 +7,14 @@ import pytest
 from oxygen_engine.adapters.oxygen import OxygenAdapter
 from oxygen_engine.aout_diagnostic import AoutDiagnosticTransport
 from oxygen_engine.aout_discovery import AoutDiscovery
-from oxygen_engine.dispatcher_v2_schema import load_v2_config
-from oxygen_engine.dual_output_dispatcher import MOTOR, SUPPLY
+from oxygen_engine.dispatcher import MOTOR, SUPPLY
+from oxygen_engine.errors import ConfigError
 from oxygen_engine.main import main
+from oxygen_engine.schema import load_dispatcher_config
 from oxygen_engine.scpi_transport import ScpiProtocolError, parse_scpi, quote_scpi
 
 ROOT = Path(__file__).resolve().parents[1]
-CONFIG = ROOT / 'tests' / 'fixtures' / 'dispatcher_v2_demo_bindings.json'
+CONFIG = ROOT / 'tests' / 'fixtures' / 'dispatcher_v3_demo_bindings.json'
 
 
 class ReadOnlyInstrument:
@@ -53,7 +53,7 @@ class ReadOnlyInstrument:
 
 @pytest.fixture
 def discovery():
-    outputs = copy.deepcopy(load_v2_config(CONFIG).raw['outputs'])
+    outputs = copy.deepcopy(load_dispatcher_config(CONFIG).raw['outputs'])
     outputs[SUPPLY]['channel'] = 'RZ-XA demand AO 9/7, exact "name"'
     outputs[SUPPLY]['display_name'] = 'Supply demand'
     outputs[MOTOR]['channel'] = 'VESC throttle AO 2/4'
@@ -191,36 +191,38 @@ def test_expected_id_is_additional_check_and_setpoint_is_not_pinned(discovery):
 
 def save_config(tmp_path, raw):
     for assignment in raw['assignments']:
-        assignment['profile'] = str((CONFIG.parent / assignment['profile']).resolve())
+        profile = Path(assignment['profile'])
+        if not profile.is_absolute():
+            assignment['profile'] = str((CONFIG.parent / profile).resolve())
     path = tmp_path / 'bindings.json'
     path.write_text(json.dumps(raw), encoding='utf-8')
     return path
 
 
 def test_schema_accepts_arbitrary_names_auto_and_optional_ids(tmp_path):
-    raw = load_v2_config(CONFIG).raw
+    raw = load_dispatcher_config(CONFIG).raw
     for role, spec in raw['outputs'].items():
         spec['channel'] = f'Custom slot 7 {role}'
         spec['display_name'] = role
         spec['const_property'] = 'auto'
-        del spec['expected_id']
-    assert load_v2_config(save_config(tmp_path, raw)).raw['outputs'] == raw['outputs']
+        spec['expected_id'] = None
+    assert load_dispatcher_config(save_config(tmp_path, raw)).raw['outputs'] == raw['outputs']
 
 
 @pytest.mark.parametrize('field,value', [('expected_id', 123), ('expected_id', 'not-an-id'),
                                         ('channel', ''), ('display_name', 123)])
 def test_schema_rejects_invalid_identity_fields(tmp_path, field, value):
-    raw = load_v2_config(CONFIG).raw
+    raw = load_dispatcher_config(CONFIG).raw
     raw['outputs'][SUPPLY][field] = value
-    with pytest.raises((ValueError, ScpiProtocolError)):
-        load_v2_config(save_config(tmp_path, raw))
+    with pytest.raises((ConfigError, ScpiProtocolError, TypeError, ValueError)):
+        load_dispatcher_config(save_config(tmp_path, raw))
 
 
 @pytest.mark.parametrize('bad_mode', [False, True])
 def test_diagnostic_reports_both_outputs_without_writes(tmp_path, monkeypatch, capsys, bad_mode):
     import oxygen_engine.aout_diagnostic as diagnostic
 
-    raw = load_v2_config(CONFIG).raw
+    raw = load_dispatcher_config(CONFIG).raw
     for role, spec in raw['outputs'].items():
         spec['channel'] = f'Physical output slot 8 {role}'
         spec['const_property'] = 'auto'

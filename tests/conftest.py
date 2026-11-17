@@ -25,7 +25,7 @@ def project_root() -> Path:
 
 @pytest.fixture
 def example_config_dict(project_root: Path) -> dict:
-    path = project_root / "config.example.json"
+    path = project_root / "examples" / "legacy-engine-config.json"
     raw = json.loads(path.read_text(encoding="utf-8"))
     raw["profiles_dir"] = str(project_root / "profiles")
     raw["logging"] = {
