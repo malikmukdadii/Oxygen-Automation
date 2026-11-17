@@ -1,13 +1,12 @@
 {
   "schema_version": 3,
   "name": "rzxa_ramp_hold",
-  "description": "Open-loop RZ-XA demand: ramp to 0.500 V from any valid current setpoint, hold, persist. 1 V AOUT = 80 V bus.",
+  "description": "Open-loop RZ-XA demand: ramp to 0.500 V from any valid current setpoint, hold, persist. Usable supply-only. Dual-output motor-neutral sequencing is via interlocks.supply_down_requires_motor_neutral when selected. 1 V AOUT = 80 V bus.",
   "output": "rzxa_voltage_demand",
   "timeout_s": 30,
   "completion": {"mode": "hold_final", "value": 0.5, "operator_action_required_to_stop": true},
-  "requires": {"motor_neutral": true},
+  "requires": {},
   "steps": [
-    {"type": "assert_preconditions", "params": {"motor_neutral": true}},
     {"type": "ramp_aout", "params": {"channel": "rzxa_voltage_demand", "target": 0.5, "duration_s": 5.0}},
     {"type": "hold", "params": {"duration_s": 3.0}},
     {"type": "checkpoint", "params": {"name": "supply_commanded_hold"}}

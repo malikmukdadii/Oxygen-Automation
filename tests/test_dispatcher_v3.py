@@ -654,9 +654,23 @@ def test_supply_only_rejects_explicit_motor_neutral_prerequisite(tmp_path):
         'one_active_profile_global': True,
         'external_emergency_stop_required_for_live': True,
     }
+    profile = {
+        'schema_version': 3,
+        'name': 'needs_motor',
+        'output': SUPPLY,
+        'timeout_s': 20,
+        'completion': {'mode': 'hold_final', 'value': 0.5, 'operator_action_required_to_stop': True},
+        'requires': {'motor_neutral': True},
+        'steps': [
+            {'type': 'assert_preconditions', 'params': {'motor_neutral': True}},
+            {'type': 'ramp_aout', 'params': {'channel': SUPPLY, 'target': 0.5, 'duration_s': 1.0}},
+        ],
+    }
+    profile_path = tmp_path / 'needs_motor.json'
+    profile_path.write_text(json.dumps(profile), encoding='utf-8')
     raw['assignments'] = [{
         'name': 'bad', 'enabled': True, 'trigger': 'DO 3/1 Sim',
-        'output': SUPPLY, 'profile': str((ROOT / 'profiles' / 'rzxa_ramp_hold.json').resolve()),
+        'output': SUPPLY, 'profile': str(profile_path),
     }]
     raw['simulation']['outputs'] = {
         supply['binding']: raw['simulation']['outputs'][supply['binding']],
@@ -665,3 +679,101 @@ def test_supply_only_rejects_explicit_motor_neutral_prerequisite(tmp_path):
     path.write_text(json.dumps(raw), encoding='utf-8')
     with pytest.raises(ConfigError, match='motor_neutral'):
         load_dispatcher_config(path)
+
+
+SUPPLY_ONLY = ROOT / 'dispatcher.v3.supply-only.example.json'
+
+
+def test_stock_rzxa_profiles_load_and_run_supply_only():
+    config = load_dispatcher_config(SUPPLY_ONLY)
+    assert config.active_roles == frozenset({SUPPLY})
+    assert {'rzxa_to_40_hold', 'rzxa_down', 'rzxa_steps'} <= set(config.profiles)
+    clock = Clock()
+    backend = MemoryBackend(config, clock=clock)
+    dispatcher = Dispatcher(config, backend, lambda *_: None, clock=clock, wait=clock.wait,
+                            timeline=boundary_timeline)
+    backend.connect()
+    dispatcher.prepare()
+    dispatcher.execute_profile('rzxa_to_40_hold')
+    assert dispatcher.states[SUPPLY].value == 0.5
+    dispatcher.execute_profile('rzxa_steps')
+    assert dispatcher.states[SUPPLY].value == 0.5
+    dispatcher.execute_profile('rzxa_down')
+    assert dispatcher.states[SUPPLY].value == 0.0
+    assert dispatcher.cleanup()
+    assert dispatcher.states[SUPPLY].value == 0.0
+
+
+def test_stock_rzxa_profiles_run_dual_with_motor_neutral_interlock():
+    config = load_dispatcher_config(EXAMPLE)
+    assert config.raw['interlocks']['supply_down_requires_motor_neutral'] is True
+    clock = Clock()
+    backend = MemoryBackend(config, clock=clock)
+    dispatcher = Dispatcher(config, backend, lambda *_: None, clock=clock, wait=clock.wait,
+                            timeline=boundary_timeline)
+    backend.connect()
+    dispatcher.prepare()
+    # Motor starts neutral; dual interlock allows stock supply profiles to run.
+    dispatcher.execute_profile('rzxa_to_40_hold')
+    assert dispatcher.states[SUPPLY].value == 0.5
+    dispatcher.execute_profile('rzxa_down')
+    assert dispatcher.states[SUPPLY].value == 0.0
+    dispatcher.execute_profile('rzxa_steps')
+    assert dispatcher.states[SUPPLY].value == 0.5
+
+
+def test_dual_can_disable_motor_neutral_sequencing(tmp_path):
+    raw = _absolutize_profiles(json.loads(EXAMPLE.read_text(encoding='utf-8')))
+    raw['interlocks']['supply_down_requires_motor_neutral'] = False
+    path = tmp_path / 'dual-no-mn.json'
+    path.write_text(json.dumps(raw), encoding='utf-8')
+    config = load_dispatcher_config(path)
+    clock = Clock()
+    backend = MemoryBackend(config, clock=clock)
+    dispatcher = Dispatcher(config, backend, lambda *_: None, clock=clock, wait=clock.wait,
+                            timeline=boundary_timeline)
+    backend.connect()
+    dispatcher.prepare()
+    # Non-neutral motor would still be refused at startup; after prepare, leave motor at 0
+    # and confirm supply runs without an explicit profile motor_neutral requirement.
+    dispatcher.execute_profile('rzxa_to_40_hold')
+    assert dispatcher.states[SUPPLY].value == 0.5
+
+
+def test_telemetry_budget_does_not_block_trigger_path(tmp_path):
+    raw = _absolutize_profiles(json.loads(EXAMPLE.read_text(encoding='utf-8')))
+    raw['measurements'] = {
+        'dc_bus_voltage': {'kind': 'number', 'unit': 'V', 'channel': 'FAKE bus', 'mapping_verified': False},
+        'extra_flag': {'kind': 'boolean', 'channel': 'FAKE flag', 'property': 'DO_Value',
+                       'mapping_verified': False},
+    }
+    raw['timing']['telemetry_poll_ms'] = 10
+    raw['timing']['poll_ms'] = 50
+    raw['simulation']['telemetry'] = {'dc_bus_voltage': 40.0, 'extra_flag': True}
+    path = tmp_path / 'tele-budget.json'
+    path.write_text(json.dumps(raw), encoding='utf-8')
+    config = load_dispatcher_config(path)
+    clock = Clock()
+    backend = MemoryBackend(config, clock=clock)
+    records = []
+    dispatcher = Dispatcher(config, backend, records.append, clock=clock, wait=clock.wait,
+                            timeline=boundary_timeline)
+    calls = {'n': 0}
+    backend.connect()
+    dispatcher.prepare()
+    original_measure = backend.measure
+
+    def slow_measure(name):
+        calls['n'] += 1
+        clock.now += 0.04  # each sample burns most of a 25 ms budget
+        return original_measure(name)
+
+    backend.measure = slow_measure
+    before = clock.now
+    dispatcher.maybe_poll_telemetry(budget_s=0.025)
+    assert clock.now - before <= 0.05
+    assert any(r.get('event') == 'telemetry_poll_deferred' for r in records) or calls['n'] >= 1
+    # AOUT path still independent of telemetry.
+    dispatcher.command(SUPPLY, 0.2)
+    assert dispatcher.states[SUPPLY].value == 0.2
+    assert not any(r.get('event') == 'independent_feedback' for r in records)

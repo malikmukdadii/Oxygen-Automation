@@ -156,13 +156,19 @@ class Dispatcher:
                    'age_s': age, 'source': sample.source, 'simulated': not self.physical})
         return sample.value
 
-    def log_measurements(self):
+    def log_measurements(self, *, deadline=None):
         """Open-loop optional logging only; never raises into control flow or alters setpoints."""
         if not self.open_loop:
             return
         for name, spec in self.config.raw.get('measurements', {}).items():
             if not isinstance(spec, dict) or not spec.get('channel'):
                 continue
+            if deadline is not None and self.clock() >= deadline:
+                self.emit({
+                    'event': 'telemetry_poll_deferred', 'logging_only': True,
+                    'message': 'Telemetry budget exhausted; DO trigger polling continues first',
+                })
+                return
             try:
                 sample = self.backend.measure(name)
                 self.emit({'event': 'measurement_log', 'name': name, 'value': sample.value,
@@ -175,7 +181,7 @@ class Dispatcher:
                     or not getattr(self.backend.transport, 'invalid', False),
                 })
 
-    def maybe_poll_telemetry(self):
+    def maybe_poll_telemetry(self, *, budget_s=None):
         """Independent open-loop telemetry tick; never called from the AOUT write path."""
         if not self.open_loop:
             return
@@ -186,7 +192,8 @@ class Dispatcher:
         if self._last_telemetry_at is not None and now - self._last_telemetry_at < interval_ms / 1000:
             return
         self._last_telemetry_at = now
-        self.log_measurements()
+        deadline = None if budget_s is None else now + max(0.0, budget_s)
+        self.log_measurements(deadline=deadline)
 
     def require_true(self, name):
         if self.sample(name) is not True:
@@ -429,7 +436,9 @@ class Dispatcher:
                 for role in self.states:
                     self.verify(role)
                 last_verify = self.clock()
-            self.maybe_poll_telemetry()
+            # Telemetry is secondary to DO edges: skip when a press is ready, and budget the poll.
+            if not ready:
+                self.maybe_poll_telemetry(budget_s=timing['poll_ms'] / 2000)
             self.wait(timing['poll_ms'] / 1000)
 
     def cleanup(self):

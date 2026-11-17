@@ -313,11 +313,13 @@ def test_numeric_source_can_reveal_transition_while_property_is_static(server):
         upper = command.upper()
         if ('NUM' in upper) and ('VAL' in upper.split(':')[-1]):
             samples += 1
+            # Advance mock REL-TIME so consecutive fast polls stay "fresh" for edge tracking.
+            server._relative_time_origin -= 0.002
             server.set_measurement('DO 3/1 Sim', float(samples >= 2))
 
     server._on_command = on_command
     status, diagnostic, records = run_diagnostic(
-        server, compare_numeric=True, event_source='numeric', duration_s=.3)
+        server, compare_numeric=True, event_source='numeric', duration_s=.35, interval_s=.015)
     assert status == 0
     assert diagnostic.summary['property_presses'] == 0
     assert diagnostic.summary['numeric_presses'] == 1

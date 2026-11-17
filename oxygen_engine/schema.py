@@ -481,8 +481,10 @@ def load_dispatcher_config(path) -> DispatcherConfig:
         raise ConfigError('external_emergency_stop_required_for_live must be true')
     demand = None
     if SUPPLY in active and MOTOR in active:
-        if interlocks.get('supply_down_requires_motor_neutral') is not True:
-            raise ConfigError('supply_down_requires_motor_neutral must be true when both roles are active')
+        if type(interlocks.get('supply_down_requires_motor_neutral')) is not bool:
+            raise ConfigError(
+                'supply_down_requires_motor_neutral must be Boolean when both roles are active '
+                '(true = verify motor neutral before supply motion)')
         if type(interlocks.get('require_supply_demand_before_motor')) is not bool:
             raise ConfigError('require_supply_demand_before_motor must be Boolean (default true in examples)')
         demand = number(interlocks['motor_supply_demand_v'], 'motor supply prerequisite',

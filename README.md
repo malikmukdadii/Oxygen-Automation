@@ -14,6 +14,9 @@ python -m venv .venv-scpi
 # Offline validate (no sockets)
 .\.venv-scpi\Scripts\python.exe -m oxygen_engine dispatch-patterns --bindings dispatcher.v3.example.json
 
+# Supply-only (stock RZ-XA profiles; no VESC role)
+.\.venv-scpi\Scripts\python.exe -m oxygen_engine dispatch-patterns --bindings dispatcher.v3.supply-only.example.json
+
 # Memory scenario
 .\.venv-scpi\Scripts\python.exe -m oxygen_engine dispatch-patterns --bindings dispatcher.v3.example.json --execute --confirm-simulated-output --scenario scenarios/open_loop_fixture_demo.json
 
