@@ -12,7 +12,7 @@ from .adapters.oxygen import OxygenAdapter
 from .aout_discovery import AoutDiscovery
 from .constant_pattern import finite_number
 from .errors import AuthorizationError, ControlError, InterlockError
-from .schema import ROLES, number
+from .schema import ABSOLUTE_AOUT_MAX_V, number
 from .scpi_transport import ScpiProtocolError, ScpiTransport, parse_scpi, quote_scpi
 
 
@@ -37,6 +37,8 @@ class OxygenTransport(ScpiTransport):
         self.capabilities = {}
         self.numeric_name = None
         self.invalid = False
+        # When True, query/write failures from optional telemetry must not kill AOUT bindings.
+        self.soft_telemetry = False
 
     def close(self):
         self.capabilities.clear()
@@ -44,6 +46,7 @@ class OxygenTransport(ScpiTransport):
         self.read_ids.clear()
         self.do_ids.clear()
         self.numeric_name = None
+        self.soft_telemetry = False
         super().close()
 
     def reconnect(self):
@@ -75,7 +78,7 @@ class OxygenTransport(ScpiTransport):
             record['raw_payload'] = reply
             return reply
         except BaseException:
-            if self.physical:
+            if self.physical and not self.soft_telemetry:
                 self.invalid = True
                 self.capabilities.clear()
             raise
@@ -84,8 +87,8 @@ class OxygenTransport(ScpiTransport):
             self.emit(record)
 
     def bind_outputs(self, reports, outputs):
-        if not self.connected or self.bindings or self.capabilities or set(reports) != set(ROLES):
-            raise ScpiProtocolError('Bindings are established once per session')
+        if not self.connected or self.bindings or self.capabilities or set(reports) != set(outputs):
+            raise ScpiProtocolError('Bindings are established once per session for active roles only')
         bindings = {}
         for role, report in reports.items():
             spec = outputs[role]
@@ -102,6 +105,7 @@ class OxygenTransport(ScpiTransport):
             else:
                 if permission.get('simulation') is not True or permission.get('physical') is not False:
                     raise ScpiProtocolError('Simulated binding requires simulation authorization')
+            # Operator-configured clamp is authoritative; discovery already verified HW coverage.
             bindings[role] = (cid, prop, spec['min_aout_v'], spec['max_aout_v'])
         if len({v[0] for v in bindings.values()}) != len(bindings):
             raise ScpiProtocolError('Output bindings collide')
@@ -111,9 +115,8 @@ class OxygenTransport(ScpiTransport):
         if self.invalid or not self.connected or role not in self.bindings:
             raise ScpiProtocolError('Output has no valid session binding')
         cid, prop, low, high = self.bindings[role]
-        ceiling = .5 if role == 'rzxa_voltage_demand' else (3.3 if self.physical else .4)
-        if low != 0 or not 0 < high <= ceiling:
-            raise ScpiProtocolError('Clamp exceeds the role ceiling')
+        if low != 0 or not 0 < high <= ABSOLUTE_AOUT_MAX_V:
+            raise ScpiProtocolError('Configured clamp is outside the absolute ConstOutput span')
         self.capabilities[(cid, prop)] = (low, high)
 
     def write(self, command):
@@ -141,7 +144,7 @@ class OxygenTransport(ScpiTransport):
         try:
             super().write(command)
         except BaseException:
-            if self.physical:
+            if self.physical and not self.soft_telemetry:
                 self.invalid = True
                 self.capabilities.clear()
             raise
@@ -192,6 +195,13 @@ class OxygenBackend:
                 ('trigger:' + k, v) for k, v in triggers.items()]:
             matches = [c for c in channels if c.name == name]
             if len(matches) != 1 or matches[0].channel_id in output_ids:
+                if key.startswith('sensor:') and self.open_loop:
+                    self.emit({
+                        'event': 'telemetry_unavailable', 'channel': name, 'key': key,
+                        'warning': True, 'logging_only': True,
+                        'message': 'Optional measurement missing; open-loop AOUT continues',
+                    })
+                    continue
                 raise ScpiProtocolError(f'{name}: independent input must have exactly one non-AOUT identity')
             cid = matches[0].channel_id
             if key in self.input_ids and self.input_ids[key] != (name, cid):
@@ -231,9 +241,19 @@ class OxygenBackend:
                     cid = self.input_ids[key][1]
                     prop = 'Unit' if name == 'dc_bus_voltage' else spec.get('property')
                     if prop and prop not in self.adapter.list_properties(cid):
+                        if self.open_loop:
+                            self.emit({
+                                'event': 'telemetry_unavailable', 'name': name, 'property': prop,
+                                'warning': True, 'logging_only': True,
+                                'message': 'Optional measurement property unavailable; AOUT continues',
+                            })
+                            self.input_ids.pop(key, None)
+                            continue
                         raise ScpiProtocolError(f'{name}: configured input property {prop!r} is unavailable')
-                if not self.open_loop and 'dc_bus_voltage' in measurements:
-                    self.transport.numeric_name = measurements['dc_bus_voltage']['channel']
+                # Enable numeric reads for optional open-loop logging and closed-loop control.
+                if 'dc_bus_voltage' in measurements and measurements['dc_bus_voltage'].get('channel'):
+                    if 'sensor:dc_bus_voltage' in self.input_ids:
+                        self.transport.numeric_name = measurements['dc_bus_voltage']['channel']
             for assignment in self.config.raw['assignments']:
                 if assignment.get('enabled', True):
                     name = assignment['trigger']
@@ -256,6 +276,7 @@ class OxygenBackend:
                 'live_feedback_enabled': not self.open_loop,
                 'physical_hardware_authorized': self.physical,
                 'output_enable_controlled': False,
+                'active_roles': sorted(self.config.raw['outputs']),
                 'endpoint': f'{self.transport.host}:{self.transport.port}',
                 'outputs': reports,
                 'inputs': dict(self.input_ids),
@@ -361,15 +382,33 @@ class OxygenBackend:
                 raise InterlockError(f'cannot satisfy measurement request: {name}')
             spec = measurements[name]
             cid = self.input_ids['sensor:' + name][1]
-            if name == 'dc_bus_voltage':
-                unit = self.adapter.get_property_value(cid, 'Unit')
-                if unit.kind != 'STRING' or unit.values != ('V',) or self.adapter.acquisition_state() != 'Started':
-                    raise ScpiProtocolError('Real bus channel must be in V with acquisition Started')
-                value = self.adapter.read_measurements([spec['channel']])[0]
-                if not math.isfinite(value):
-                    raise ScpiProtocolError('Nonfinite measured hardware bus voltage')
-            else:
-                value = self._boolean(cid, spec['property'])
-            self.error()
-            return Sample(value, started, f'OXYGEN {cid}/{spec.get("property") or "numeric"}',
-                          simulated=not self.physical)
+            # Soft telemetry: faults must not invalidate AOUT bindings on a healthy session.
+            if self.open_loop:
+                self.transport.soft_telemetry = True
+            try:
+                if name == 'dc_bus_voltage':
+                    unit = self.adapter.get_property_value(cid, 'Unit')
+                    if unit.kind != 'STRING' or unit.values != ('V',):
+                        raise InterlockError('Bus channel unit is not V')
+                    if not self.open_loop:
+                        if self.adapter.acquisition_state() != 'Started':
+                            raise ScpiProtocolError('Real bus channel must be in V with acquisition Started')
+                    if self.transport.numeric_name is None:
+                        self.transport.numeric_name = spec['channel']
+                    value = self.adapter.read_measurements([spec['channel']])[0]
+                    if not math.isfinite(value):
+                        raise InterlockError('Nonfinite measured bus voltage')
+                else:
+                    value = self._boolean(cid, spec['property'])
+                self.error()
+                return Sample(value, started, f'OXYGEN {cid}/{spec.get("property") or "numeric"}',
+                              simulated=not self.physical)
+            except InterlockError:
+                raise
+            except Exception as exc:
+                if self.open_loop:
+                    raise InterlockError(f'optional measurement failed: {exc}') from exc
+                raise
+            finally:
+                if self.open_loop:
+                    self.transport.soft_telemetry = False

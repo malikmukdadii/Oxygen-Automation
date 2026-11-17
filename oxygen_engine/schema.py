@@ -12,9 +12,12 @@ from .constant_pattern import finite_number
 from .errors import AuthorizationError, ConfigError
 
 ROLES = {'rzxa_voltage_demand': 'supply_voltage_demand', 'vesc_throttle': 'motor_throttle'}
-SUPPLY_MAX_V = 0.5
-MOTOR_EXAMPLE_MAX_V = 0.4
-MOTOR_SCHEMA_CEILING_V = 3.3
+SUPPLY = 'rzxa_voltage_demand'
+MOTOR = 'vesc_throttle'
+# Absolute schema ceiling (typical OXYGEN ConstOutput span). Operator max_aout_v is authoritative
+# within this bound and must still fit the discovered hardware range. Examples keep 0.500 V supply.
+ABSOLUTE_AOUT_MAX_V = 10.0
+MOTOR_EXAMPLE_MAX_V = 0.4  # simulated-motor default clamp (not a physical hardware raise)
 VERIFIED_GAIN = 80.0  # 1.000 V AOUT = 80 V bus (verified documentation)
 LIVE_FLAGS = {
     'enable_physical_aout', 'enable_rzxa_output_toggle', 'enable_real_rzxa_scpi',
@@ -99,6 +102,18 @@ class DispatcherConfig:
         return self.transport == 'oxygen_scpi' and any(
             spec['authorization']['physical'] for spec in self.raw['outputs'].values()
         )
+
+    @property
+    def active_roles(self) -> frozenset[str]:
+        return frozenset(self.raw['outputs'])
+
+    @property
+    def has_supply(self) -> bool:
+        return SUPPLY in self.raw['outputs']
+
+    @property
+    def has_motor(self) -> bool:
+        return MOTOR in self.raw['outputs']
 
 
 def load_profile(path, output, spec, *, open_loop: bool):
@@ -204,8 +219,9 @@ def load_profile(path, output, spec, *, open_loop: bool):
 
 def _validate_outputs(raw, *, physical: bool, open_loop: bool):
     outputs = raw.get('outputs')
-    if not isinstance(outputs, dict) or set(outputs) != set(ROLES):
-        raise ConfigError('Both rzxa_voltage_demand and vesc_throttle roles are required')
+    if not isinstance(outputs, dict) or not outputs or set(outputs) - set(ROLES):
+        raise ConfigError(
+            'outputs must configure at least one known role: rzxa_voltage_demand and/or vesc_throttle')
     names, ids, bindings = set(), set(), set()
     for role, spec in outputs.items():
         keys(spec, {
@@ -252,16 +268,15 @@ def _validate_outputs(raw, *, physical: bool, open_loop: bool):
             if cid in ids:
                 raise ConfigError('Expected IDs cannot alias')
             ids.add(cid)
-        ceiling = SUPPLY_MAX_V if role == 'rzxa_voltage_demand' else (
-            MOTOR_SCHEMA_CEILING_V if physical else MOTOR_EXAMPLE_MAX_V)
+        # Operator-configured max is authoritative within the absolute ConstOutput span.
         number(spec.get('min_aout_v'), 'minimum', 0, 0)
-        number(spec['max_aout_v'], 'maximum', .001, ceiling)
-        if not physical and role == 'vesc_throttle' and spec['max_aout_v'] > MOTOR_EXAMPLE_MAX_V:
+        number(spec['max_aout_v'], 'maximum', .001, ABSOLUTE_AOUT_MAX_V)
+        if not physical and role == MOTOR and spec['max_aout_v'] > MOTOR_EXAMPLE_MAX_V:
             raise ConfigError('Simulated motor clamp remains 0.4 V unless physically authorized')
-        policy = 'preserve_demand' if role == 'rzxa_voltage_demand' else 'return_neutral'
+        policy = 'preserve_demand' if role == SUPPLY else 'return_neutral'
         if any(spec.get(k) != policy for k in ('on_cancel', 'on_fault', 'on_shutdown')):
             raise ConfigError('Supply must preserve demand; motor must attempt neutral on termination')
-        if role == 'vesc_throttle':
+        if role == MOTOR:
             number(spec.get('neutral_aout_v'), 'motor neutral', 0, 0)
             if spec.get('completion_policy') != 'return_neutral':
                 raise ConfigError('Motor completion_policy must be return_neutral')
@@ -299,7 +314,7 @@ def confirm_outputs(config, confirmed_outputs, *, live=False):
     required = {spec['channel'] for spec in config.raw['outputs'].values()}
     if set(confirmed_outputs) != required:
         raise AuthorizationError(
-            f'Confirm BOTH configured AOUT channel names with --confirm-output: {sorted(required)}')
+            f'Confirm every configured AOUT channel name with --confirm-output: {sorted(required)}')
     if config.physical and live is not True:
         raise AuthorizationError('Physical oxygen_scpi execution requires a single --live acknowledgement')
 
@@ -342,9 +357,18 @@ def load_dispatcher_config(path) -> DispatcherConfig:
         if any(flags.get(k) is not v for k, v in expected.items()):
             raise ConfigError('Physical live_control enables AOUT only; RZ-XA SCPI stays disabled')
         acks = raw.get('hardware_authorization', {})
+        active = set(outputs_probe) if isinstance(outputs_probe, dict) else set()
+        required_acks = {
+            'wiring_verified', 'external_emergency_stop_verified', 'external_enable_control_verified',
+        }
+        if SUPPLY in active:
+            required_acks.add('supply_mapping_verified')
+        if MOTOR in active:
+            required_acks.add('motor_neutral_verified')
         keys(acks, HARDWARE_ACKNOWLEDGEMENTS, 'hardware_authorization')
-        if set(acks) != HARDWARE_ACKNOWLEDGEMENTS or any(v is not True for v in acks.values()):
-            raise ConfigError('Explicitly verify wiring, scaling, neutral, external enable and e-stop')
+        if set(acks) != required_acks or any(acks.get(k) is not True for k in required_acks):
+            raise ConfigError(
+                f'Explicitly verify hardware acknowledgements for active roles: {sorted(required_acks)}')
         if open_loop:
             ola = raw.get('open_loop_authorization', {})
             keys(ola, OUTPUT_ONLY_ACKNOWLEDGEMENTS, 'open_loop_authorization')
@@ -373,7 +397,9 @@ def load_dispatcher_config(path) -> DispatcherConfig:
     outputs = _validate_outputs(raw, physical=physical, open_loop=open_loop)
 
     timing = raw.get('timing', {})
-    keys(timing, {'poll_ms', 'max_trigger_gap_ms', 'interval_ms', 'max_lateness_ms'}, 'timing')
+    keys(timing, {
+        'poll_ms', 'max_trigger_gap_ms', 'interval_ms', 'max_lateness_ms', 'telemetry_poll_ms',
+    }, 'timing')
     poll = number(timing['poll_ms'], 'poll_ms', 20, 250)
     if number(timing['max_trigger_gap_ms'], 'max_trigger_gap_ms', 20, 1000) <= poll:
         raise ConfigError('Maximum gap must exceed polling interval')
@@ -421,27 +447,49 @@ def load_dispatcher_config(path) -> DispatcherConfig:
         for name, measurement in measurements.items():
             _validate_measurement_entry(name, measurement, require_verified=physical)
 
+    # Independent open-loop telemetry interval (0 = no background poll; never blocks AOUT writes).
+    has_optional_channels = open_loop and any(
+        isinstance(m, dict) and m.get('channel') for m in measurements.values())
+    if 'telemetry_poll_ms' in timing and timing['telemetry_poll_ms'] is not None:
+        number(timing['telemetry_poll_ms'], 'telemetry_poll_ms', 0, 60000)
+    else:
+        timing['telemetry_poll_ms'] = 500 if has_optional_channels else 0
+
+    active = set(outputs)
     interlocks = raw.get('interlocks', {})
-    base = {
-        'motor_supply_demand_v', 'supply_down_requires_motor_neutral', 'one_active_profile_global',
-        'external_emergency_stop_required_for_live', 'require_supply_demand_before_motor',
+    base = {'one_active_profile_global', 'external_emergency_stop_required_for_live'}
+    cross = {
+        'motor_supply_demand_v', 'supply_down_requires_motor_neutral', 'require_supply_demand_before_motor',
     }
     feedback_keys = {
         'bus_target_v', 'bus_tolerance_v', 'max_feedback_age_s',
         'motor_requires_measured_bus_in_range', 'allow_unverified_simulated_interlock_values',
         'allow_unverified_live_interlock_values',
     }
-    keys(interlocks, base | (set() if open_loop else feedback_keys), 'interlocks')
-    if interlocks.get('supply_down_requires_motor_neutral') is not True:
-        raise ConfigError('supply_down_requires_motor_neutral must be true')
+    allowed_interlocks = set(base)
+    if SUPPLY in active and MOTOR in active:
+        allowed_interlocks |= cross
+    elif MOTOR in active:
+        # Motor-only: cross-role supply prereq may be explicitly disabled.
+        allowed_interlocks |= {'require_supply_demand_before_motor'}
+    if not open_loop:
+        allowed_interlocks |= feedback_keys
+    keys(interlocks, allowed_interlocks, 'interlocks')
     if interlocks.get('one_active_profile_global') is not True:
         raise ConfigError('one_active_profile_global must be true')
     if interlocks.get('external_emergency_stop_required_for_live') is not True:
         raise ConfigError('external_emergency_stop_required_for_live must be true')
-    if type(interlocks.get('require_supply_demand_before_motor')) is not bool:
-        raise ConfigError('require_supply_demand_before_motor must be Boolean (default true in examples)')
-    demand = number(interlocks['motor_supply_demand_v'], 'motor supply prerequisite',
-                    0, outputs['rzxa_voltage_demand']['max_aout_v'])
+    demand = None
+    if SUPPLY in active and MOTOR in active:
+        if interlocks.get('supply_down_requires_motor_neutral') is not True:
+            raise ConfigError('supply_down_requires_motor_neutral must be true when both roles are active')
+        if type(interlocks.get('require_supply_demand_before_motor')) is not bool:
+            raise ConfigError('require_supply_demand_before_motor must be Boolean (default true in examples)')
+        demand = number(interlocks['motor_supply_demand_v'], 'motor supply prerequisite',
+                        0, outputs[SUPPLY]['max_aout_v'])
+    elif MOTOR in active:
+        if interlocks.get('require_supply_demand_before_motor', False) is not False:
+            raise ConfigError('Motor-only configs must set require_supply_demand_before_motor false')
     if not open_loop:
         if interlocks.get('motor_requires_measured_bus_in_range') is not True:
             raise ConfigError('Closed-loop requires measured bus interlock')
@@ -454,8 +502,8 @@ def load_dispatcher_config(path) -> DispatcherConfig:
         target = number(interlocks['bus_target_v'], 'bus target', 1, 60)
         number(interlocks['bus_tolerance_v'], 'bus tolerance', .01, 5)
         number(interlocks['max_feedback_age_s'], 'feedback age', .01, 1)
-        if physical:
-            gain = outputs['rzxa_voltage_demand']['mapping']['gain_bus_v_per_aout_v']
+        if physical and demand is not None and SUPPLY in outputs:
+            gain = outputs[SUPPLY]['mapping']['gain_bus_v_per_aout_v']
             if not math.isclose(demand * gain, target, rel_tol=1e-9, abs_tol=1e-6):
                 raise ConfigError('Verified supply gain, motor demand prerequisite and bus target disagree')
 
@@ -527,7 +575,18 @@ def load_dispatcher_config(path) -> DispatcherConfig:
         if output not in outputs:
             raise ConfigError('Unknown output role')
         filename = exact_name(assignment.get('profile'), 'profile path')
-        profiles[name] = load_profile(path.parent / filename, output, outputs[output], open_loop=open_loop)
+        profile = load_profile(path.parent / filename, output, outputs[output], open_loop=open_loop)
+        if MOTOR not in outputs:
+            if profile.requires.get('motor_neutral'):
+                raise ConfigError(f'{name}: motor_neutral prerequisite needs an active vesc_throttle role')
+            for step in profile.steps:
+                if step['type'] == 'assert_preconditions' and step.get('params', {}).get('motor_neutral'):
+                    raise ConfigError(
+                        f'{name}: assert_preconditions.motor_neutral needs an active vesc_throttle role')
+        if SUPPLY not in outputs and output == MOTOR:
+            # Motor-only is allowed; cross-role supply demand is gated by interlocks, not profile load.
+            pass
+        profiles[name] = profile
         triggers.add(trigger)
     if not profiles:
         raise ConfigError('At least one enabled assignment is required')

@@ -340,6 +340,7 @@ def test_open_loop_logging_measurements_do_not_alter_setpoints(tmp_path):
     raw['measurements'] = {
         'dc_bus_voltage': {'kind': 'number', 'unit': 'V', 'channel': 'FAKE bus', 'mapping_verified': False}
     }
+    raw['timing']['telemetry_poll_ms'] = 0
     raw['simulation']['telemetry'] = {'dc_bus_voltage': 12.0}
     path = tmp_path / 'log-meas.json'
     path.write_text(json.dumps(raw), encoding='utf-8')
@@ -355,6 +356,9 @@ def test_open_loop_logging_measurements_do_not_alter_setpoints(tmp_path):
     dispatcher.states[SUPPLY].value = 0.1
     dispatcher.execute_profile('rzxa_to_40_hold')
     assert dispatcher.states[SUPPLY].value == 0.5
+    # AOUT write path must not sync-query telemetry.
+    assert not any(r.get('event') == 'measurement_log' for r in records)
+    dispatcher.log_measurements()
     assert any(r.get('event') == 'measurement_log' for r in records)
     assert not any(r.get('event') == 'independent_feedback' for r in records)
 
@@ -371,7 +375,7 @@ def test_confirm_outputs_has_no_name_whitelist():
     config = load_dispatcher_config(DEMO)
     # Any exact configured names work; whitelist removed.
     confirm_outputs(config, ['Test Aout2', 'Test Aout1'], live=False)
-    with pytest.raises(AuthorizationError, match='Confirm BOTH'):
+    with pytest.raises(AuthorizationError, match='Confirm every configured'):
         confirm_outputs(config, ['Test Aout2'], live=False)
     physical = load_dispatcher_config(HARDWARE)
     with pytest.raises(AuthorizationError, match='--live'):
@@ -408,3 +412,256 @@ def test_physical_execution_requires_live(monkeypatch):
         'dispatch-patterns', '--bindings', str(HARDWARE), '--execute',
         '--confirm-output', 'Test Aout2', '--confirm-output', 'Test Aout1',
     ]) == 1
+
+
+def _supply_only_profile(tmp_path):
+    profile = {
+        'schema_version': 3,
+        'name': 'supply_only_hold',
+        'output': 'rzxa_voltage_demand',
+        'timeout_s': 30,
+        'completion': {'mode': 'hold_final', 'value': 0.5, 'operator_action_required_to_stop': True},
+        'requires': {},
+        'steps': [
+            {'type': 'ramp_aout', 'params': {'channel': 'rzxa_voltage_demand', 'target': 0.5, 'duration_s': 2.0}},
+            {'type': 'hold', 'params': {'duration_s': 1.0}},
+        ],
+    }
+    path = tmp_path / 'supply_only_hold.json'
+    path.write_text(json.dumps(profile), encoding='utf-8')
+    return path
+
+
+def test_missing_optional_measurement_warns_not_aborts(tmp_path):
+    raw = _absolutize_profiles(json.loads(EXAMPLE.read_text(encoding='utf-8')))
+    raw['measurements'] = {
+        'dc_bus_voltage': {
+            'kind': 'number', 'unit': 'V', 'channel': 'Missing Bus Sensor', 'mapping_verified': False,
+        }
+    }
+    # No simulation.telemetry entry — measure fails softly.
+    raw['timing']['telemetry_poll_ms'] = 0
+    path = tmp_path / 'missing-meas.json'
+    path.write_text(json.dumps(raw), encoding='utf-8')
+    config = load_dispatcher_config(path)
+    clock = Clock()
+    backend = MemoryBackend(config, clock=clock)
+    records = []
+    dispatcher = Dispatcher(config, backend, records.append, clock=clock, wait=clock.wait,
+                            timeline=boundary_timeline)
+    backend.connect()
+    dispatcher.prepare()
+    dispatcher.execute_profile('rzxa_to_40_hold')
+    assert dispatcher.states[SUPPLY].value == 0.5
+    dispatcher.log_measurements()
+    assert any(r.get('event') == 'measurement_log_failed' for r in records)
+
+
+def test_measurement_timeout_during_ramp_does_not_block_aout(tmp_path):
+    raw = _absolutize_profiles(json.loads(EXAMPLE.read_text(encoding='utf-8')))
+    raw['measurements'] = {
+        'dc_bus_voltage': {'kind': 'number', 'unit': 'V', 'channel': 'FAKE bus', 'mapping_verified': False}
+    }
+    raw['timing']['telemetry_poll_ms'] = 0
+    raw['simulation']['telemetry'] = {'dc_bus_voltage': 40.0}
+    path = tmp_path / 'timeout-meas.json'
+    path.write_text(json.dumps(raw), encoding='utf-8')
+    config = load_dispatcher_config(path)
+    clock = Clock()
+    backend = MemoryBackend(config, clock=clock)
+    records = []
+    dispatcher = Dispatcher(config, backend, records.append, clock=clock, wait=clock.wait,
+                            timeline=boundary_timeline)
+
+    def flaky_measure(name):
+        raise TimeoutError('measurement communication timeout')
+
+    backend.connect()
+    dispatcher.prepare()
+    backend.measure = flaky_measure
+    dispatcher.execute_profile('rzxa_to_40_hold')
+    assert dispatcher.states[SUPPLY].value == 0.5
+    dispatcher.log_measurements()
+    assert any(r.get('event') == 'measurement_log_failed' and 'timeout' in r.get('error', '').lower()
+               for r in records)
+    assert any(r.get('aout_session_intact') for r in records if r.get('event') == 'measurement_log_failed')
+
+
+def test_open_loop_telemetry_poll_is_independent_of_writes(tmp_path):
+    raw = _absolutize_profiles(json.loads(EXAMPLE.read_text(encoding='utf-8')))
+    raw['measurements'] = {
+        'dc_bus_voltage': {'kind': 'number', 'unit': 'V', 'channel': 'FAKE bus', 'mapping_verified': False}
+    }
+    raw['timing']['telemetry_poll_ms'] = 100
+    raw['simulation']['telemetry'] = {'dc_bus_voltage': 11.0}
+    path = tmp_path / 'poll-meas.json'
+    path.write_text(json.dumps(raw), encoding='utf-8')
+    config = load_dispatcher_config(path)
+    assert config.raw['timing']['telemetry_poll_ms'] == 100
+    clock = Clock()
+    backend = MemoryBackend(config, clock=clock)
+    records = []
+    dispatcher = Dispatcher(config, backend, records.append, clock=clock, wait=clock.wait,
+                            timeline=boundary_timeline)
+    backend.connect()
+    dispatcher.prepare()
+    dispatcher.maybe_poll_telemetry()
+    assert any(r.get('event') == 'measurement_log' for r in records)
+    before = len([r for r in records if r.get('event') == 'measurement_log'])
+    dispatcher.command(SUPPLY, 0.25)
+    after_write = len([r for r in records if r.get('event') == 'measurement_log'])
+    assert after_write == before
+    clock.now += 0.2
+    dispatcher.maybe_poll_telemetry()
+    assert len([r for r in records if r.get('event') == 'measurement_log']) > before
+
+
+def test_supply_only_initialization_and_execution(tmp_path):
+    raw = json.loads(EXAMPLE.read_text(encoding='utf-8'))
+    profile = _supply_only_profile(tmp_path)
+    supply = raw['outputs'][SUPPLY]
+    raw['outputs'] = {SUPPLY: supply}
+    raw['interlocks'] = {
+        'one_active_profile_global': True,
+        'external_emergency_stop_required_for_live': True,
+    }
+    raw['assignments'] = [{
+        'name': 'supply_only', 'enabled': True, 'trigger': 'DO 3/1 Sim',
+        'output': SUPPLY, 'profile': str(profile),
+    }]
+    raw['simulation']['outputs'] = {
+        supply['binding']: raw['simulation']['outputs'][supply['binding']],
+    }
+    path = tmp_path / 'supply-only.json'
+    path.write_text(json.dumps(raw), encoding='utf-8')
+    config = load_dispatcher_config(path)
+    assert config.active_roles == frozenset({SUPPLY})
+    assert not config.has_motor
+    clock = Clock()
+    backend = MemoryBackend(config, clock=clock)
+    dispatcher = Dispatcher(config, backend, lambda *_: None, clock=clock, wait=clock.wait,
+                            timeline=boundary_timeline)
+    backend.connect()
+    dispatcher.prepare()
+    assert set(dispatcher.states) == {SUPPLY}
+    dispatcher.execute_profile('supply_only')
+    assert dispatcher.states[SUPPLY].value == 0.5
+    assert dispatcher.cleanup()
+    assert dispatcher.states[SUPPLY].value == 0.5
+
+
+def test_motor_only_initialization_and_execution(tmp_path):
+    raw = json.loads(EXAMPLE.read_text(encoding='utf-8'))
+    motor = raw['outputs'][MOTOR]
+    raw['outputs'] = {MOTOR: motor}
+    raw['interlocks'] = {
+        'one_active_profile_global': True,
+        'external_emergency_stop_required_for_live': True,
+        'require_supply_demand_before_motor': False,
+    }
+    gentle = str((ROOT / 'profiles' / 'motor_gentle.json').resolve())
+    raw['assignments'] = [{
+        'name': 'motor_only', 'enabled': True, 'trigger': 'DO 3/4 Sim',
+        'output': MOTOR, 'profile': gentle,
+    }]
+    raw['simulation']['outputs'] = {
+        motor['binding']: raw['simulation']['outputs'][motor['binding']],
+    }
+    path = tmp_path / 'motor-only.json'
+    path.write_text(json.dumps(raw), encoding='utf-8')
+    config = load_dispatcher_config(path)
+    assert config.active_roles == frozenset({MOTOR})
+    clock = Clock()
+    backend = MemoryBackend(config, clock=clock)
+    dispatcher = Dispatcher(config, backend, lambda *_: None, clock=clock, wait=clock.wait,
+                            timeline=boundary_timeline)
+    backend.connect()
+    dispatcher.prepare()
+    assert set(dispatcher.states) == {MOTOR}
+    dispatcher.execute_profile('motor_only')
+    assert dispatcher.states[MOTOR].value == 0
+    assert dispatcher.cleanup()
+
+
+def test_dual_output_still_works():
+    config = load_dispatcher_config(EXAMPLE)
+    assert config.active_roles == frozenset({SUPPLY, MOTOR})
+    clock = Clock()
+    backend = MemoryBackend(config, clock=clock)
+    dispatcher = Dispatcher(config, backend, lambda *_: None, clock=clock, wait=clock.wait,
+                            timeline=boundary_timeline)
+    backend.connect()
+    dispatcher.prepare()
+    dispatcher.execute_profile('rzxa_to_40_hold')
+    dispatcher.execute_profile('motor_gentle')
+    assert dispatcher.states[SUPPLY].value == 0.5
+    assert dispatcher.states[MOTOR].value == 0
+
+
+def test_operator_configured_voltage_limit_authoritative(tmp_path):
+    raw = _absolutize_profiles(json.loads(EXAMPLE.read_text(encoding='utf-8')))
+    raw['outputs'][SUPPLY]['max_aout_v'] = 0.75
+    raw['simulation']['outputs'][raw['outputs'][SUPPLY]['binding']]['max_v'] = 0.75
+    # Keep motor interlock demand inside new supply clamp.
+    raw['interlocks']['motor_supply_demand_v'] = 0.5
+    profile = {
+        'schema_version': 3,
+        'name': 'to_075',
+        'output': SUPPLY,
+        'timeout_s': 20,
+        'completion': {'mode': 'hold_final', 'value': 0.75, 'operator_action_required_to_stop': True},
+        'requires': {'motor_neutral': True},
+        'steps': [
+            {'type': 'assert_preconditions', 'params': {'motor_neutral': True}},
+            {'type': 'ramp_aout', 'params': {'channel': SUPPLY, 'target': 0.75, 'duration_s': 2.0}},
+            {'type': 'hold', 'params': {'duration_s': 1.0}},
+        ],
+    }
+    profile_path = tmp_path / 'to_075.json'
+    profile_path.write_text(json.dumps(profile), encoding='utf-8')
+    raw['assignments'] = [{
+        'name': 'to_075', 'enabled': True, 'trigger': 'DO 3/1 Sim',
+        'output': SUPPLY, 'profile': str(profile_path),
+    }, {
+        'name': 'motor_gentle', 'enabled': True, 'trigger': 'DO 3/4 Sim',
+        'output': MOTOR, 'profile': str((ROOT / 'profiles' / 'motor_gentle.json').resolve()),
+    }]
+    path = tmp_path / 'limit.json'
+    path.write_text(json.dumps(raw), encoding='utf-8')
+    config = load_dispatcher_config(path)
+    assert config.raw['outputs'][SUPPLY]['max_aout_v'] == 0.75
+    clock = Clock()
+    backend = MemoryBackend(config, clock=clock)
+    dispatcher = Dispatcher(config, backend, lambda *_: None, clock=clock, wait=clock.wait,
+                            timeline=boundary_timeline)
+    backend.connect()
+    dispatcher.prepare()
+    dispatcher.execute_profile('to_075')
+    assert dispatcher.states[SUPPLY].value == 0.75
+
+
+def test_example_supply_limit_remains_half_volt():
+    config = load_dispatcher_config(EXAMPLE)
+    assert config.raw['outputs'][SUPPLY]['max_aout_v'] == 0.5
+    assert config.raw['outputs'][SUPPLY]['mapping']['gain_bus_v_per_aout_v'] == 80.0
+
+
+def test_supply_only_rejects_explicit_motor_neutral_prerequisite(tmp_path):
+    raw = json.loads(EXAMPLE.read_text(encoding='utf-8'))
+    supply = raw['outputs'][SUPPLY]
+    raw['outputs'] = {SUPPLY: supply}
+    raw['interlocks'] = {
+        'one_active_profile_global': True,
+        'external_emergency_stop_required_for_live': True,
+    }
+    raw['assignments'] = [{
+        'name': 'bad', 'enabled': True, 'trigger': 'DO 3/1 Sim',
+        'output': SUPPLY, 'profile': str((ROOT / 'profiles' / 'rzxa_ramp_hold.json').resolve()),
+    }]
+    raw['simulation']['outputs'] = {
+        supply['binding']: raw['simulation']['outputs'][supply['binding']],
+    }
+    path = tmp_path / 'bad-supply.json'
+    path.write_text(json.dumps(raw), encoding='utf-8')
+    with pytest.raises(ConfigError, match='motor_neutral'):
+        load_dispatcher_config(path)

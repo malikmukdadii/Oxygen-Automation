@@ -47,6 +47,8 @@ class Dispatcher:
         self.outputs = config.raw['outputs']
         self.open_loop = config.open_loop
         self.physical = config.physical
+        self.has_supply = config.has_supply
+        self.has_motor = config.has_motor
         self.states = {}
         self.active_profile = None
         self.active_role = None
@@ -54,6 +56,7 @@ class Dispatcher:
         self.started = 0
         self.completed = 0
         self.interrupted_cycle = False
+        self._last_telemetry_at = None
         if not self.open_loop:
             # Fail closed early if closed_loop was selected without a controller.
             require_controller()
@@ -165,18 +168,38 @@ class Dispatcher:
                 self.emit({'event': 'measurement_log', 'name': name, 'value': sample.value,
                            'source': sample.source, 'logging_only': True, 'simulated': not self.physical})
             except Exception as exc:
-                self.emit({'event': 'measurement_log_failed', 'name': name, 'error': str(exc),
-                           'logging_only': True})
+                self.emit({
+                    'event': 'measurement_log_failed', 'name': name, 'error': str(exc),
+                    'logging_only': True,
+                    'aout_session_intact': not getattr(self.backend, 'transport', None)
+                    or not getattr(self.backend.transport, 'invalid', False),
+                })
+
+    def maybe_poll_telemetry(self):
+        """Independent open-loop telemetry tick; never called from the AOUT write path."""
+        if not self.open_loop:
+            return
+        interval_ms = self.config.raw['timing'].get('telemetry_poll_ms', 0) or 0
+        if interval_ms <= 0:
+            return
+        now = self.clock()
+        if self._last_telemetry_at is not None and now - self._last_telemetry_at < interval_ms / 1000:
+            return
+        self._last_telemetry_at = now
+        self.log_measurements()
 
     def require_true(self, name):
         if self.sample(name) is not True:
             raise InterlockError(f'Interlock not satisfied: {name}')
 
     def motor_neutral(self):
+        if not self.has_motor:
+            raise InterlockError('motor_neutral prerequisite requires an active vesc_throttle role')
         self.verify(MOTOR, self.outputs[MOTOR]['neutral_aout_v'])
 
     def regen_safe(self):
-        self.motor_neutral()
+        if self.has_motor:
+            self.motor_neutral()
         if self.open_loop:
             return
         self.require_true('regen_safe')
@@ -184,11 +207,13 @@ class Dispatcher:
 
     def motor_interlocks(self, profile):
         interlocks = self.config.raw['interlocks']
-        self.verify(SUPPLY)
-        if interlocks.get('require_supply_demand_before_motor', True):
+        if self.has_supply and interlocks.get('require_supply_demand_before_motor', False):
+            self.verify(SUPPLY)
             if not math.isclose(self.states[SUPPLY].value, interlocks['motor_supply_demand_v'],
                                 abs_tol=1e-6, rel_tol=0):
                 raise InterlockError('Supply demand readback is not the configured motor prerequisite')
+        elif interlocks.get('require_supply_demand_before_motor'):
+            raise InterlockError('require_supply_demand_before_motor needs an active supply role')
         if self.open_loop:
             return
         requirement = profile.requires.get('measured_bus_voltage', {})
@@ -209,10 +234,17 @@ class Dispatcher:
         for step in profile.steps:
             if step['type'] == 'assert_preconditions':
                 requested.update(step['params'])
+        wants_motor_neutral = bool(
+            requested.get('motor_neutral') or profile.requires.get('motor_neutral'))
         if profile.output == MOTOR:
-            self.motor_neutral()
+            if self.has_motor:
+                self.motor_neutral()
             self.motor_interlocks(profile)
-        else:
+        elif wants_motor_neutral:
+            # Explicit cross-role prerequisite — never silently skipped.
+            self.motor_neutral()
+        elif self.has_motor and self.config.raw['interlocks'].get('supply_down_requires_motor_neutral'):
+            # Dual-output default: supply motion still requires verified motor neutral.
             self.motor_neutral()
         if not self.open_loop:
             if requested.get('supply_output_enabled_or_verified_external') or 'supply_output_enable' in profile.requires:
@@ -223,8 +255,6 @@ class Dispatcher:
                 self.require_true('supply_standalone_test')
             if requested.get('bus_voltage_validated'):
                 self.motor_interlocks(profile)
-        if requested.get('motor_neutral') or profile.requires.get('motor_neutral'):
-            self.motor_neutral()
         # Optional legacy guard — open-loop supply ramps may start from any valid setpoint.
         if requested.get('current_aout_must_be_zero_or_already_target') or requested.get('reject_other_start_values'):
             current = self.verify(profile.output)
@@ -233,6 +263,8 @@ class Dispatcher:
                 raise InterlockError('Repeat-safe supply profile requires zero or already-at-target readback')
 
     def command(self, role, value):
+        if role not in self.outputs:
+            raise ControlError(f'{role}: role is not an active configured output')
         spec = self.outputs[role]
         value = number(value, 'setpoint', spec['min_aout_v'], spec['max_aout_v'])
         if not self.open_loop:
@@ -240,8 +272,7 @@ class Dispatcher:
             measured = {name: self.sample(name) for name in self.config.raw.get('measurements', {})}
             value = number(controller.correct(role, value, measured), 'corrected setpoint',
                            spec['min_aout_v'], spec['max_aout_v'])
-        else:
-            self.log_measurements()
+        # Open-loop: never query telemetry on the AOUT write path.
         self.context(role)
         self.emit({'event': 'write_attempt', 'simulated': not self.physical, 'output': role,
                    'requested_v': value, 'owner': self.active_profile, 'control_mode': self.config.mode})
@@ -320,15 +351,19 @@ class Dispatcher:
                     if role == MOTOR:
                         self.motor_interlocks(profile)
                     else:
-                        self.motor_neutral()
-                        if value < self.states[SUPPLY].value - 1e-9:
+                        if self.has_motor and self.config.raw['interlocks'].get(
+                                'supply_down_requires_motor_neutral'):
+                            self.motor_neutral()
+                        if (self.has_supply and value < self.states[SUPPLY].value - 1e-9 and
+                                self.has_motor):
                             self.regen_safe()
                     self.command(role, value)
 
                 def verify(value):
                     if role == MOTOR:
                         self.motor_interlocks(profile)
-                    else:
+                    elif self.has_motor and self.config.raw['interlocks'].get(
+                            'supply_down_requires_motor_neutral'):
                         self.motor_neutral()
                     self.verify(role, value)
 
@@ -394,6 +429,7 @@ class Dispatcher:
                 for role in self.states:
                     self.verify(role)
                 last_verify = self.clock()
+            self.maybe_poll_telemetry()
             self.wait(timing['poll_ms'] / 1000)
 
     def cleanup(self):
@@ -402,30 +438,33 @@ class Dispatcher:
             self.emit({'event': 'cleanup_not_authorized',
                        'message': 'No startup output writes or guessed restoration'})
             return True
-        try:
-            self.context(MOTOR)
-            neutral = self.outputs[MOTOR]['neutral_aout_v']
-            if self.open_loop:
-                self.command(MOTOR, neutral)
-            else:
-                # Closed-loop cleanup must not depend on feedback sampling.
-                self.backend.write(MOTOR, neutral)
-                self.verify(MOTOR, neutral)
-                self.states[MOTOR].value = neutral
-                self.states[MOTOR].held_by = None
-            self.emit({'event': 'motor_neutral_verified', 'simulated': not self.physical})
-        except (Exception, KeyboardInterrupt) as exc:
-            self.states[MOTOR].status = 'unknown'
-            safe = False
-            self.emit({'event': 'motor_neutral_unknown', 'error': str(exc)})
-        try:
-            self.verify(SUPPLY)
-            self.emit({'event': 'supply_demand_preserved', 'value_v': self.states[SUPPLY].value,
-                       'not_power_off': True, 'simulated': not self.physical})
-        except (Exception, KeyboardInterrupt) as exc:
-            self.states[SUPPLY].status = 'unknown'
-            safe = False
-            self.emit({'event': 'supply_demand_unknown', 'error': str(exc), 'no_supply_write_attempted': True})
+        if self.has_motor:
+            try:
+                self.context(MOTOR)
+                neutral = self.outputs[MOTOR]['neutral_aout_v']
+                if self.open_loop:
+                    self.command(MOTOR, neutral)
+                else:
+                    # Closed-loop cleanup must not depend on feedback sampling.
+                    self.backend.write(MOTOR, neutral)
+                    self.verify(MOTOR, neutral)
+                    self.states[MOTOR].value = neutral
+                    self.states[MOTOR].held_by = None
+                self.emit({'event': 'motor_neutral_verified', 'simulated': not self.physical})
+            except (Exception, KeyboardInterrupt) as exc:
+                self.states[MOTOR].status = 'unknown'
+                safe = False
+                self.emit({'event': 'motor_neutral_unknown', 'error': str(exc)})
+        if self.has_supply:
+            try:
+                self.verify(SUPPLY)
+                self.emit({'event': 'supply_demand_preserved', 'value_v': self.states[SUPPLY].value,
+                           'not_power_off': True, 'simulated': not self.physical})
+            except (Exception, KeyboardInterrupt) as exc:
+                self.states[SUPPLY].status = 'unknown'
+                safe = False
+                self.emit({'event': 'supply_demand_unknown', 'error': str(exc),
+                           'no_supply_write_attempted': True})
         # Open-loop cleanup must never sample measurements.
         if not self.open_loop:
             try:

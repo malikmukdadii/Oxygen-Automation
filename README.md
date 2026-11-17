@@ -32,10 +32,12 @@ python -m venv .venv-scpi
 | Item | Behavior |
 |------|----------|
 | `control.mode` | `open_loop` (default) or `closed_loop` |
-| Discovery | Full AOUT discovery once at connect; pinned for the session (no rediscover on ramp steps) |
+| Active roles | Configure supply-only, motor-only, or dual under `outputs` |
+| Discovery | Full AOUT discovery once at connect for active roles only; pinned for the session |
 | Supply | Ramps from any valid current setpoint; `hold_final` persists demand |
-| Motor | Independent profiles; `return_neutral`; optional `require_supply_demand_before_motor` |
-| Measurements | Optional in open_loop for **logging only**; never block or alter setpoints |
+| Motor | Independent profiles; `return_neutral`; cross-role prereqs only when both roles are active |
+| Limits | Operator `max_aout_v` is authoritative (within HW range); examples keep 0.500 V / 80 V/V |
+| Measurements | Optional open_loop logging on `telemetry_poll_ms`; never sync on AOUT writes; missing sensors warn |
 | Closed-loop | Requires a registered controller; otherwise `ControlNotReady` |
 
 ## Profiles

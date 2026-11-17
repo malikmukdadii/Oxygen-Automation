@@ -309,14 +309,15 @@ def test_numeric_source_can_reveal_transition_while_property_is_static(server):
     def on_command(command):
         nonlocal samples
         # Flip on numeric samples so prepare-time DO_Value reads cannot pre-arm the edge.
-        if command.rstrip('?').endswith('VALue') or command.endswith(':VALue?'):
-            if 'NUMeric' in command.upper() or 'NUM' in command.upper():
-                samples += 1
-                server.set_measurement('DO 3/1 Sim', float(samples >= 2))
+        # Match both long-form VALue? and abbreviated VAL? (header-on path).
+        upper = command.upper()
+        if ('NUM' in upper) and ('VAL' in upper.split(':')[-1]):
+            samples += 1
+            server.set_measurement('DO 3/1 Sim', float(samples >= 2))
 
     server._on_command = on_command
     status, diagnostic, records = run_diagnostic(
-        server, compare_numeric=True, event_source='numeric', duration_s=.25)
+        server, compare_numeric=True, event_source='numeric', duration_s=.3)
     assert status == 0
     assert diagnostic.summary['property_presses'] == 0
     assert diagnostic.summary['numeric_presses'] == 1
