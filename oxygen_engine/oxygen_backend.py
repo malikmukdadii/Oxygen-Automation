@@ -148,20 +148,14 @@ class OxygenTransport(ScpiTransport):
 
 
 class OxygenBackend:
-    def __init__(self, config, emit, *, confirmed_outputs, live=False, interlocks_confirmed=False,
-                 clock=time.monotonic):
+    def __init__(self, config, emit, *, confirmed_outputs, live=False, clock=time.monotonic):
         if config.transport != 'oxygen_scpi':
             raise AuthorizationError('OxygenBackend requires transport oxygen_scpi')
+        from .schema import confirm_outputs
+        confirm_outputs(config, confirmed_outputs, live=live)
         self.config, self.emit, self.clock = config, emit, clock
         self.physical = config.physical
         self.open_loop = config.open_loop
-        if self.physical:
-            from .schema import confirm_physical_outputs
-            confirm_physical_outputs(config, confirmed_outputs, live=live,
-                                     interlocks_confirmed=interlocks_confirmed)
-        else:
-            from .schema import confirm_demo_outputs
-            confirm_demo_outputs(config.raw['outputs'], confirmed_outputs)
         connection = config.raw['connection']
         self.transport = OxygenTransport(
             host=connection['host'], port=connection['port'], timeout_s=connection['timeout_s'],
@@ -175,6 +169,8 @@ class OxygenBackend:
         self.failed = False
         self.writes_attempted = 0
         self.do_channels = {}
+        self._session = None
+        self.full_discover_count = 0
 
     @property
     def connected(self):
@@ -187,9 +183,10 @@ class OxygenBackend:
 
     def _pin_inputs(self, channels):
         output_ids = set(self.channel_ids.values())
-        sensors = {}
-        if not self.open_loop:
-            sensors = {name: m['channel'] for name, m in self.config.raw.get('measurements', {}).items()}
+        sensors = {
+            name: m['channel'] for name, m in self.config.raw.get('measurements', {}).items()
+            if isinstance(m, dict) and m.get('channel')
+        }
         triggers = {a['name']: a['trigger'] for a in self.config.raw['assignments'] if a.get('enabled', True)}
         for key, name in [('sensor:' + k, v) for k, v in sensors.items()] + [
                 ('trigger:' + k, v) for k, v in triggers.items()]:
@@ -211,16 +208,32 @@ class OxygenBackend:
             if self.adapter.identify().split(',')[:2] != ['DEWETRON', 'OXYGEN']:
                 raise ScpiProtocolError('Expected DEWETRON OXYGEN')
             reports = self.discovery.discover()
+            self.full_discover_count += 1
             self.channel_ids = {role: r['channel_id'] for role, r in reports.items()}
+            self._session = {
+                self.config.raw['outputs'][role]['binding']: {
+                    'name': r['channel'], 'id': r['channel_id'], 'mode': r['mode'],
+                    'source': r['source'], 'property': r['const_property'], 'unit': r['unit'],
+                    'min_v': r['range'][0], 'max_v': r['range'][1],
+                } for role, r in reports.items()
+            }
             channels = self.adapter.list_channels()
             self._pin_inputs(channels)
-            if not self.open_loop:
-                for name, spec in self.config.raw.get('measurements', {}).items():
-                    cid = self.input_ids['sensor:' + name][1]
-                    prop = 'Unit' if name == 'dc_bus_voltage' else spec['property']
-                    if prop not in self.adapter.list_properties(cid):
+            measurements = self.config.raw.get('measurements', {})
+            if measurements and (not self.open_loop or any(
+                    isinstance(m, dict) and m.get('channel') for m in measurements.values())):
+                for name, spec in measurements.items():
+                    if not spec.get('channel'):
+                        continue
+                    key = 'sensor:' + name
+                    if key not in self.input_ids:
+                        continue
+                    cid = self.input_ids[key][1]
+                    prop = 'Unit' if name == 'dc_bus_voltage' else spec.get('property')
+                    if prop and prop not in self.adapter.list_properties(cid):
                         raise ScpiProtocolError(f'{name}: configured input property {prop!r} is unavailable')
-                self.transport.numeric_name = self.config.raw['measurements']['dc_bus_voltage']['channel']
+                if not self.open_loop and 'dc_bus_voltage' in measurements:
+                    self.transport.numeric_name = measurements['dc_bus_voltage']['channel']
             for assignment in self.config.raw['assignments']:
                 if assignment.get('enabled', True):
                     name = assignment['trigger']
@@ -231,7 +244,7 @@ class OxygenBackend:
                     self.transport.do_ids.add(cid)
                     self.read_button(name)
             if not self.open_loop:
-                for name in self.config.raw.get('measurements', {}):
+                for name in measurements:
                     self.measure(name)
             self.error()
             self.transport.bind_outputs(reports, self.config.raw['outputs'])
@@ -246,33 +259,23 @@ class OxygenBackend:
                 'endpoint': f'{self.transport.host}:{self.transport.port}',
                 'outputs': reports,
                 'inputs': dict(self.input_ids),
+                'full_discover_count': self.full_discover_count,
             })
 
     def close(self):
         with self.lock:
             self.authorized.clear()
+            self._session = None
             self.transport.close()
 
     def discover(self):
+        """Return session-pinned discovery. Does not re-enumerate OXYGEN during ramps."""
         with self.lock:
             if self.failed:
                 raise ScpiProtocolError('Session invalidated; close and restart')
-            try:
-                reports = self.discovery.discover()
-                self._pin_inputs(self.adapter.list_channels())
-                self.error()
-                return {
-                    self.config.raw['outputs'][role]['binding']: {
-                        'name': r['channel'], 'id': r['channel_id'], 'mode': r['mode'],
-                        'source': r['source'], 'property': r['const_property'], 'unit': r['unit'],
-                        'min_v': r['range'][0], 'max_v': r['range'][1],
-                    } for role, r in reports.items()
-                }
-            except BaseException:
-                self.failed = True
-                self.authorized.clear()
-                self.transport.capabilities.clear()
-                raise
+            if self._session is None:
+                raise ScpiProtocolError('Discovery is pinned at connect; session is not ready')
+            return {key: dict(value) for key, value in self._session.items()}
 
     def constant_property(self, role):
         return self.discovery.pinned[role]['const_property']
@@ -287,7 +290,8 @@ class OxygenBackend:
         with self.lock:
             if spec != self.config.raw['outputs'].get(role) or binding != spec.get('binding'):
                 raise AuthorizationError('Authorization does not match configured output')
-            self.discover()
+            if self._session is None:
+                raise AuthorizationError('Cannot authorize before session discovery is pinned')
             self.transport.authorize(role)
             self.authorized.add(role)
 
@@ -307,7 +311,8 @@ class OxygenBackend:
         with self.lock:
             if role not in self.authorized:
                 raise AuthorizationError('Output role not authorized by completed startup preflight')
-            self.discover()
+            if self._session is None:
+                raise AuthorizationError('Write refused: discovery session is not pinned')
             spec = self.config.raw['outputs'][role]
             value = number(value, 'demand', spec['min_aout_v'], spec['max_aout_v'])
             if (self.physical and not self.open_loop and
@@ -345,14 +350,16 @@ class OxygenBackend:
 
     def measure(self, name):
         with self.lock:
-            if self.open_loop:
-                raise InterlockError(
-                    'Open-loop mode has no live measurements; AOUT readbacks are not physical feedback')
-            if name not in self.config.raw.get('measurements', {}):
+            measurements = self.config.raw.get('measurements', {})
+            if name not in measurements:
+                raise InterlockError(f'cannot satisfy measurement request: {name}')
+            if self.open_loop and not measurements[name].get('channel'):
                 raise InterlockError(f'cannot satisfy measurement request: {name}')
             started = self.clock()
-            self._pin_inputs(self.adapter.list_channels())
-            spec = self.config.raw['measurements'][name]
+            # Use pinned sensor IDs; do not re-list the full channel tree.
+            if 'sensor:' + name not in self.input_ids:
+                raise InterlockError(f'cannot satisfy measurement request: {name}')
+            spec = measurements[name]
             cid = self.input_ids['sensor:' + name][1]
             if name == 'dc_bus_voltage':
                 unit = self.adapter.get_property_value(cid, 'Unit')

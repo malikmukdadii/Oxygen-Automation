@@ -1,7 +1,7 @@
 {
   "schema_version": 3,
   "name": "motor_gentle",
-  "description": "Open-loop motor throttle gentle ramp; supply demand unchanged. Returns to 0 V neutral.",
+  "description": "Open-loop gentle motor ramp; supply demand unchanged. Returns to 0 V neutral.",
   "output": "vesc_throttle",
   "timeout_s": 30,
   "completion": {"mode": "return_neutral", "value": 0.0},

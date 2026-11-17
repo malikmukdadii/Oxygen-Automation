@@ -1,7 +1,7 @@
 {
   "schema_version": 3,
   "name": "rzxa_ramp_down",
-  "description": "Open-loop explicit supply-demand ramp to 0 V after motor neutral. Does not disable RZ output.",
+  "description": "Open-loop supply-demand ramp to 0 V after motor neutral. Persists only until this profile finishes at zero.",
   "output": "rzxa_voltage_demand",
   "timeout_s": 30,
   "completion": {"mode": "verify_zero", "value": 0.0},

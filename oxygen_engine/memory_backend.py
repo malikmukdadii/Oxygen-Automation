@@ -83,15 +83,20 @@ class MemoryBackend:
         self.next_sample = self.started_at
         self.writes_attempted = 0
         self.open_loop = config.open_loop
+        self.full_discover_count = 0
+        self._session = None
 
     def connect(self):
         with self.lock:
             self.connected = True
+            self.full_discover_count += 1
+            self._session = copy.deepcopy(self.outputs)
 
     def close(self):
         with self.lock:
             self.connected = False
             self.capabilities.clear()
+            self._session = None
 
     def _connected(self):
         if not self.connected:
@@ -109,16 +114,14 @@ class MemoryBackend:
             self.streaming = event.get('streaming', self.streaming)
             if event.get('stop'):
                 raise SimulationFinished('End of explicit simulation scenario')
-        if self.streaming and now >= self.next_sample and not self.open_loop:
+        if self.streaming and now >= self.next_sample and self.sensor_values:
             for name, value in self.sensor_values.items():
                 self.samples[name] = Sample(value, now)
             self.next_sample = now + self.sample_interval
 
     def inject(self, name, value, *, sampled_at=None):
         with self.lock:
-            if self.open_loop:
-                raise InterlockError('Open-loop memory backend has no measurement fixtures')
-            if name not in self.sensor_values:
+            if name not in self.sensor_values and name not in self.config.raw.get('measurements', {}):
                 raise ConfigError('Unknown independent sensor fixture')
             self.sensor_values[name] = value
             self.samples[name] = Sample(value, self.clock() if sampled_at is None else sampled_at)
@@ -126,7 +129,17 @@ class MemoryBackend:
     def discover(self):
         with self.lock:
             self.pump()
-            return copy.deepcopy(self.outputs)
+            if self._session is None:
+                raise ControlError('Discovery is pinned at connect; session is not ready')
+            # Return the session pin; fixture values may update but identity fields stay pinned.
+            pinned = copy.deepcopy(self._session)
+            for key, fixture in pinned.items():
+                live = self.outputs.get(key, {})
+                if 'value' in live:
+                    fixture['value'] = live['value']
+                if 'initial_v' in live:
+                    fixture['initial_v'] = live.get('initial_v', fixture.get('initial_v'))
+            return pinned
 
     def constant_property(self, role):
         binding = self.config.raw['outputs'][role]['binding']
@@ -177,10 +190,9 @@ class MemoryBackend:
 
     def measure(self, name):
         with self.lock:
-            if self.open_loop:
-                raise InterlockError(
-                    'Open-loop mode has no measurements; AOUT readbacks are not physical feedback')
             self.pump()
+            if name not in self.sensor_values and name not in self.config.raw.get('measurements', {}):
+                raise InterlockError(f'cannot satisfy measurement request: {name}')
             if name not in self.sensor_values:
                 raise InterlockError(f'cannot satisfy measurement request: {name}')
             sample = self.samples.get(name)

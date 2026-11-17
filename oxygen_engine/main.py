@@ -78,26 +78,6 @@ def build_parser() -> argparse.ArgumentParser:
     watch.add_argument('--status-interval', type=float, default=1.0,
                        help='Seconds between unchanged console status samples; zero shows changes only')
 
-    pattern = sub.add_parser('aout-pattern', help='Preview or explicitly execute the approved simulated constant-output pattern')
-    pattern.add_argument('--profile', default=str(_project_root() / 'profiles' / 'sim_aout_ramp_10s.json'))
-    pattern.add_argument('--channel', default='AO 3/1 Sim')
-    pattern.add_argument('--expected-id', help='Required current channel ID for execution; name alone is not sufficient')
-    pattern.add_argument('--host', default='127.0.0.1')
-    pattern.add_argument('--port', type=int, default=10001)
-    pattern.add_argument('--timeout', type=float, default=0.5)
-    pattern.add_argument('--interval-ms', type=float, default=50.0)
-    pattern.add_argument('--max-lateness-ms', type=float, default=250.0)
-    pattern.add_argument('--execute', action='store_true', help='Actually write setpoints; default is offline preview')
-    pattern.add_argument('--confirm-simulated-output', action='store_true',
-                         help='Per-run operator confirmation that AO 3/1 Sim is genuinely simulated and unconnected')
-    pattern.add_argument('--log-file')
-    pattern.add_argument('--csv-file', help='Nominal reference CSV, not an uploaded waveform')
-    pattern.add_argument('--trigger-do', choices=['DO 3/1 Sim'],
-                         help='Wait for LOW then HIGH; run once per press until Ctrl+C, with no queued runs')
-    pattern.add_argument('--poll-ms', type=float, default=50.0, help='Idle DO polling interval')
-    pattern.add_argument('--max-trigger-gap-ms', type=float, default=250.0,
-                         help='Discard trigger edges across stale observations')
-
     dispatcher = sub.add_parser('dispatch-patterns', help='Validate or run schema v3 dual-AOUT dispatcher (open_loop default)')
     dispatcher.add_argument('--bindings', default=str(_project_root() / 'dispatcher.v3.example.json'),
                             help='Dispatcher JSON file; profile paths are relative to this file')
@@ -106,12 +86,12 @@ def build_parser() -> argparse.ArgumentParser:
                             help='Confirm simulation/memory execution (no physical actuation)')
     dispatcher.add_argument('--log-file', help='Rotating JSONL log; default logs/dispatcher-*.jsonl')
     dispatcher.add_argument('--scenario', help='Memory transport fixture events only; never used with OXYGEN')
+    dispatcher.add_argument('--confirm-output', action='append', default=[], metavar='EXACT_CHANNEL_NAME',
+                            help='Confirm each configured AOUT channel name (repeat for both)')
     dispatcher.add_argument('--confirm-demo-output', action='append', default=[], metavar='EXACT_CHANNEL_NAME',
-                            help='Simulated oxygen_scpi: confirm each selected AO is genuinely simulated (repeat for both)')
+                            help=argparse.SUPPRESS)
     dispatcher.add_argument('--confirm-physical-output', action='append', default=[], metavar='EXACT_CHANNEL_NAME',
-                            help='Physical oxygen_scpi: authorize each configured physical AOUT (repeat for both)')
-    dispatcher.add_argument('--confirm-hardware-interlocks', action='store_true',
-                            help='Physical oxygen_scpi: acknowledge verified wiring/scaling/neutral, enables and e-stop')
+                            help=argparse.SUPPRESS)
 
     aout_discovery = sub.add_parser('discover-aout', help='Read-only discovery and validation of both configured AOUTs')
     aout_discovery.add_argument('--bindings', default=str(_project_root() / 'dispatcher.v3.oxygen-demo.example.json'))
@@ -184,12 +164,6 @@ def _make_engine(args: argparse.Namespace) -> AutomationEngine:
         else:
             config.profiles_dir = str(_project_root() / "profiles")
     return AutomationEngine(config, dry_run=dry_run, event_logger=events, dashboard=dashboard)
-
-
-def cmd_aout_pattern(args: argparse.Namespace) -> int:
-    from .constant_pattern import run_constant_pattern
-
-    return run_constant_pattern(args)
 
 
 def cmd_dispatch_patterns(args: argparse.Namespace) -> int:
@@ -429,7 +403,6 @@ def main(argv: list[str] | None = None) -> int:
     handlers = {
         "discover-aout": cmd_discover_aout,
         "dispatch-patterns": cmd_dispatch_patterns,
-        "aout-pattern": cmd_aout_pattern,
         "watch-do": cmd_watch_do,
         "scpi-smoke": cmd_scpi_smoke,
         "discover": cmd_discover,

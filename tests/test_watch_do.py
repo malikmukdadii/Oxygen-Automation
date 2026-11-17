@@ -304,16 +304,19 @@ def test_numeric_unsupported_falls_back_to_property(server, monkeypatch):
 
 
 def test_numeric_source_can_reveal_transition_while_property_is_static(server):
-    calls = 0
+    samples = 0
 
     def on_command(command):
-        nonlocal calls
-        if command.endswith(',"DO_Value"'):
-            calls += 1
-            server.set_measurement('DO 3/1 Sim', float(calls >= 3))
+        nonlocal samples
+        # Flip on numeric samples so prepare-time DO_Value reads cannot pre-arm the edge.
+        if command.rstrip('?').endswith('VALue') or command.endswith(':VALue?'):
+            if 'NUMeric' in command.upper() or 'NUM' in command.upper():
+                samples += 1
+                server.set_measurement('DO 3/1 Sim', float(samples >= 2))
 
     server._on_command = on_command
-    status, diagnostic, records = run_diagnostic(server, compare_numeric=True, event_source='numeric')
+    status, diagnostic, records = run_diagnostic(
+        server, compare_numeric=True, event_source='numeric', duration_s=.25)
     assert status == 0
     assert diagnostic.summary['property_presses'] == 0
     assert diagnostic.summary['numeric_presses'] == 1

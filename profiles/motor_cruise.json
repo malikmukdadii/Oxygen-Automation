@@ -1,0 +1,21 @@
+{
+  "schema_version": 3,
+  "name": "motor_cruise",
+  "description": "Open-loop multi-level cruise steps; supply demand unchanged. Returns to neutral.",
+  "output": "vesc_throttle",
+  "timeout_s": 30,
+  "completion": {"mode": "return_neutral", "value": 0.0},
+  "requires": {"motor_neutral": true, "motor_enable": "operator_verified"},
+  "steps": [
+    {"type": "assert_preconditions", "params": {"motor_neutral": true}},
+    {"type": "set_aout", "params": {"channel": "vesc_throttle", "value": 0.0}},
+    {"type": "ramp_aout", "params": {"channel": "vesc_throttle", "target": 0.2, "duration_s": 2.0}},
+    {"type": "hold", "params": {"duration_s": 2.0}},
+    {"type": "ramp_aout", "params": {"channel": "vesc_throttle", "target": 0.4, "duration_s": 2.0}},
+    {"type": "hold", "params": {"duration_s": 3.0}},
+    {"type": "ramp_aout", "params": {"channel": "vesc_throttle", "target": 0.25, "duration_s": 2.0}},
+    {"type": "hold", "params": {"duration_s": 2.0}},
+    {"type": "ramp_aout", "params": {"channel": "vesc_throttle", "target": 0.0, "duration_s": 3.0}},
+    {"type": "return_neutral", "params": {"channel": "vesc_throttle"}}
+  ]
+}

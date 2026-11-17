@@ -1,0 +1,20 @@
+{
+  "schema_version": 3,
+  "name": "rzxa_steps",
+  "description": "Open-loop supply characterization steps 0.45/0.50 around the 40 V bus equivalent (0.5 V AOUT). Hold final 0.5 V.",
+  "output": "rzxa_voltage_demand",
+  "timeout_s": 30,
+  "completion": {"mode": "hold_final", "value": 0.5, "operator_action_required_to_stop": true},
+  "requires": {"motor_neutral": true},
+  "steps": [
+    {"type": "assert_preconditions", "params": {"motor_neutral": true}},
+    {"type": "ramp_aout", "params": {"channel": "rzxa_voltage_demand", "target": 0.45, "duration_s": 3.0}},
+    {"type": "hold", "params": {"duration_s": 3.0}},
+    {"type": "ramp_aout", "params": {"channel": "rzxa_voltage_demand", "target": 0.5, "duration_s": 2.0}},
+    {"type": "hold", "params": {"duration_s": 3.0}},
+    {"type": "ramp_aout", "params": {"channel": "rzxa_voltage_demand", "target": 0.45, "duration_s": 2.0}},
+    {"type": "hold", "params": {"duration_s": 3.0}},
+    {"type": "ramp_aout", "params": {"channel": "rzxa_voltage_demand", "target": 0.5, "duration_s": 2.0}},
+    {"type": "hold", "params": {"duration_s": 2.0}}
+  ]
+}

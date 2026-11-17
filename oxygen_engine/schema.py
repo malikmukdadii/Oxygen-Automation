@@ -8,14 +8,14 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .adapters.oxygen import OxygenAdapter
-from .constant_pattern import CONSTANT_PROPERTY, finite_number
+from .constant_pattern import finite_number
 from .errors import AuthorizationError, ConfigError
 
 ROLES = {'rzxa_voltage_demand': 'supply_voltage_demand', 'vesc_throttle': 'motor_throttle'}
 SUPPLY_MAX_V = 0.5
 MOTOR_EXAMPLE_MAX_V = 0.4
 MOTOR_SCHEMA_CEILING_V = 3.3
-VERIFIED_GAIN = 80.0
+VERIFIED_GAIN = 80.0  # 1.000 V AOUT = 80 V bus (verified documentation)
 LIVE_FLAGS = {
     'enable_physical_aout', 'enable_rzxa_output_toggle', 'enable_real_rzxa_scpi',
     'require_explicit_hardware_authorization',
@@ -38,18 +38,6 @@ HARDWARE_ACKNOWLEDGEMENTS = {
 }
 OUTPUT_ONLY_ACKNOWLEDGEMENTS = {
     'no_live_feedback_acknowledged', 'external_bus_and_regen_protection_verified',
-}
-# Historical demo approvals for simulated-channel execution confirmations.
-DEMO_APPROVALS = {
-    'rzxa_voltage_demand': {
-        'AO 3/1 Sim': frozenset({CONSTANT_PROPERTY, 'TRION/SourceChannel_A_CONST/Const1',
-                                 'TRION/SourceChannel_A_CONST/Const4'}),
-        'Test Aout2': frozenset({'TRION/SourceChannel_A_CONST/Const4'}),
-    },
-    'vesc_throttle': {
-        'AO 3/2 Sim': frozenset({CONSTANT_PROPERTY, 'TRION/SourceChannel_A_CONST/Const1'}),
-        'Test Aout1': frozenset({CONSTANT_PROPERTY}),
-    },
 }
 
 
@@ -304,24 +292,16 @@ def _validate_outputs(raw, *, physical: bool, open_loop: bool):
     return outputs
 
 
-def confirm_demo_outputs(outputs, confirmed_outputs):
-    required = {spec['channel'] for spec in outputs.values()}
+def confirm_outputs(config, confirmed_outputs, *, live=False):
+    """One confirmation path for oxygen_scpi: exact configured channel names; --live for physical."""
+    if config.transport != 'oxygen_scpi':
+        return
+    required = {spec['channel'] for spec in config.raw['outputs'].values()}
     if set(confirmed_outputs) != required:
         raise AuthorizationError(
-            f'Confirm BOTH configured simulated AOs with --confirm-demo-output: {sorted(required)}')
-    for role, spec in outputs.items():
-        if spec['channel'] not in DEMO_APPROVALS.get(role, {}):
-            raise AuthorizationError('Only explicitly approved simulated-channel names may execute')
-
-
-def confirm_physical_outputs(config, confirmed_outputs, *, live, interlocks_confirmed):
-    if not config.physical:
-        raise AuthorizationError('Physical authorization requires physical oxygen_scpi outputs')
-    required = {spec['channel'] for spec in config.raw['outputs'].values()}
-    if live is not True or interlocks_confirmed is not True or set(confirmed_outputs) != required:
-        raise AuthorizationError(
-            'Hardware execution requires --live, --confirm-hardware-interlocks, '
-            'and --confirm-physical-output for BOTH exact configured AOUT names')
+            f'Confirm BOTH configured AOUT channel names with --confirm-output: {sorted(required)}')
+    if config.physical and live is not True:
+        raise AuthorizationError('Physical oxygen_scpi execution requires a single --live acknowledgement')
 
 
 def load_dispatcher_config(path) -> DispatcherConfig:
@@ -406,9 +386,31 @@ def load_dispatcher_config(path) -> DispatcherConfig:
     if not isinstance(measurements, dict):
         raise ConfigError('measurements must be an object')
     raw['measurements'] = measurements
-    if open_loop and measurements:
-        raise ConfigError('Open-loop requires measurements to be empty or omitted')
-    if not open_loop:
+
+    def _validate_measurement_entry(name, measurement, *, require_verified: bool):
+        keys(measurement, {'kind', 'unit', 'channel', 'property', 'mapping_verified'}, name)
+        expected_kind = 'number' if name == 'dc_bus_voltage' else 'boolean'
+        if measurement.get('kind') != expected_kind:
+            raise ConfigError(f'{name}: kind mismatch')
+        if require_verified:
+            if measurement.get('mapping_verified') is not True:
+                raise ConfigError(f'{name}: verified hardware mapping required')
+            channel = exact_name(measurement.get('channel'), f'{name} channel')
+            if channel in {s['channel'] for s in outputs.values() if s.get('channel')}:
+                raise ConfigError('Feedback cannot alias an AOUT command channel')
+            if name == 'dc_bus_voltage':
+                if measurement.get('unit') != 'V' or measurement.get('property') is not None:
+                    raise ConfigError('DC bus uses numeric measurement channel in V')
+            else:
+                exact_name(measurement.get('property'), f'{name} Boolean property')
+        elif measurement.get('mapping_verified') is not False:
+            raise ConfigError('Simulated/open-loop logging measurement mappings remain unverified')
+
+    if open_loop:
+        # Optional logging-only channels; never required for control.
+        for name, measurement in measurements.items():
+            _validate_measurement_entry(name, measurement, require_verified=False)
+    else:
         required = {
             'dc_bus_voltage', 'motor_input_mapping_verified', 'motor_physical_disable_verified',
             'supply_external_ready', 'regen_safe', 'supply_shutdown_permitted',
@@ -417,28 +419,12 @@ def load_dispatcher_config(path) -> DispatcherConfig:
         if set(measurements) != required:
             raise ConfigError('Closed-loop requires the full independent measurement role set')
         for name, measurement in measurements.items():
-            keys(measurement, {'kind', 'unit', 'channel', 'property', 'mapping_verified'}, name)
-            expected_kind = 'number' if name == 'dc_bus_voltage' else 'boolean'
-            if measurement.get('kind') != expected_kind:
-                raise ConfigError(f'{name}: kind mismatch')
-            if physical:
-                if measurement.get('mapping_verified') is not True:
-                    raise ConfigError(f'{name}: verified hardware mapping required')
-                channel = exact_name(measurement.get('channel'), f'{name} channel')
-                if channel in {s['channel'] for s in outputs.values()}:
-                    raise ConfigError('Feedback cannot alias an AOUT command channel')
-                if name == 'dc_bus_voltage':
-                    if measurement.get('unit') != 'V' or measurement.get('property') is not None:
-                        raise ConfigError('DC bus uses numeric measurement channel in V')
-                else:
-                    exact_name(measurement.get('property'), f'{name} Boolean property')
-            elif measurement.get('mapping_verified') is not False:
-                raise ConfigError('Simulated measurement mappings remain unverified')
+            _validate_measurement_entry(name, measurement, require_verified=physical)
 
     interlocks = raw.get('interlocks', {})
     base = {
         'motor_supply_demand_v', 'supply_down_requires_motor_neutral', 'one_active_profile_global',
-        'external_emergency_stop_required_for_live',
+        'external_emergency_stop_required_for_live', 'require_supply_demand_before_motor',
     }
     feedback_keys = {
         'bus_target_v', 'bus_tolerance_v', 'max_feedback_age_s',
@@ -452,6 +438,8 @@ def load_dispatcher_config(path) -> DispatcherConfig:
         raise ConfigError('one_active_profile_global must be true')
     if interlocks.get('external_emergency_stop_required_for_live') is not True:
         raise ConfigError('external_emergency_stop_required_for_live must be true')
+    if type(interlocks.get('require_supply_demand_before_motor')) is not bool:
+        raise ConfigError('require_supply_demand_before_motor must be Boolean (default true in examples)')
     demand = number(interlocks['motor_supply_demand_v'], 'motor supply prerequisite',
                     0, outputs['rzxa_voltage_demand']['max_aout_v'])
     if not open_loop:
@@ -493,14 +481,14 @@ def load_dispatcher_config(path) -> DispatcherConfig:
             OxygenAdapter._channel_id(str(fixture['id']))
             if fixture.get('mode') != 'ConstOutput' or fixture.get('unit') != 'V':
                 raise ConfigError('Fixture outputs must be ConstOutput in V')
-        telemetry = simulation.get('telemetry', {})
-        if open_loop:
-            if telemetry not in ({}, None) and telemetry != {}:
-                raise ConfigError('Open-loop memory transport must not inject measurement telemetry')
-            simulation['telemetry'] = {}
-        else:
-            if set(telemetry) != set(measurements):
-                raise ConfigError('Closed-loop memory telemetry must cover every measurement role')
+        telemetry = simulation.get('telemetry', {}) or {}
+        if not isinstance(telemetry, dict):
+            raise ConfigError('simulation.telemetry must be an object')
+        if set(telemetry) - set(measurements):
+            raise ConfigError('simulation.telemetry keys must be declared under measurements')
+        if not open_loop and set(telemetry) != set(measurements):
+            raise ConfigError('Closed-loop memory telemetry must cover every measurement role')
+        simulation['telemetry'] = telemetry
     elif simulation not in ({}, None) and simulation != {}:
         if physical:
             raise ConfigError('Physical oxygen_scpi must omit simulation fixtures')
@@ -512,8 +500,10 @@ def load_dispatcher_config(path) -> DispatcherConfig:
         number(simulation.get('sample_interval_s', .1), 'sample interval', .01, 1)
         if type(simulation.get('streaming')) is not bool:
             raise ConfigError('streaming must be Boolean')
-        if open_loop:
-            simulation['telemetry'] = {}
+        telemetry = simulation.get('telemetry', {}) or {}
+        if set(telemetry) - set(measurements):
+            raise ConfigError('simulation.telemetry keys must be declared under measurements')
+        simulation['telemetry'] = telemetry
     else:
         raw['simulation'] = {}
 

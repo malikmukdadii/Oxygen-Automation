@@ -64,6 +64,7 @@
   "measurements": {},
   "interlocks": {
     "motor_supply_demand_v": 0.5,
+    "require_supply_demand_before_motor": true,
     "supply_down_requires_motor_neutral": true,
     "one_active_profile_global": true,
     "external_emergency_stop_required_for_live": true
@@ -73,7 +74,10 @@
   "assignments": [
     {"name": "rzxa_to_40_hold", "enabled": true, "trigger": "Ramp Enable", "output": "rzxa_voltage_demand", "profile": "profiles/rzxa_ramp_hold.json"},
     {"name": "rzxa_down", "enabled": true, "trigger": "Ramp Disable", "output": "rzxa_voltage_demand", "profile": "profiles/rzxa_ramp_down.json"},
-    {"name": "motor_gentle", "enabled": true, "trigger": "Motor Gentle", "output": "vesc_throttle", "profile": "profiles/motor_gentle.json"}
+    {"name": "rzxa_steps", "enabled": true, "trigger": "RZXA Char", "output": "rzxa_voltage_demand", "profile": "profiles/rzxa_steps.json"},
+    {"name": "motor_gentle", "enabled": true, "trigger": "Motor Gentle", "output": "vesc_throttle", "profile": "profiles/motor_gentle.json"},
+    {"name": "motor_stop_go", "enabled": true, "trigger": "Motor Stop Go", "output": "vesc_throttle", "profile": "profiles/motor_stop_go.json"},
+    {"name": "motor_cruise", "enabled": true, "trigger": "Motor Cruise", "output": "vesc_throttle", "profile": "profiles/motor_cruise.json"}
   ],
   "simulation": {
     "namespace": "OXYGEN_SIMULATED_IO_FAKE_TELEMETRY",

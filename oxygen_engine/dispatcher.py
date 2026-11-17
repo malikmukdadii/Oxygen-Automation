@@ -134,8 +134,9 @@ class Dispatcher:
                    'physical_mapping_verified': self.physical, 'output_enable_controlled': False})
 
     def sample(self, name, *, max_age=None):
+        """Closed-loop / interlock sampling. Open-loop must use log_measurements() instead."""
         if self.open_loop:
-            raise InterlockError(f'cannot satisfy measurement request in open_loop: {name}')
+            raise InterlockError(f'cannot satisfy control measurement request in open_loop: {name}')
         sample = self.backend.measure(name)
         limit = self.config.raw['interlocks']['max_feedback_age_s'] if max_age is None else max_age
         age = self.clock() - sample.sampled_at
@@ -151,6 +152,21 @@ class Dispatcher:
         self.emit({'event': 'independent_feedback', 'name': name, 'value': sample.value,
                    'age_s': age, 'source': sample.source, 'simulated': not self.physical})
         return sample.value
+
+    def log_measurements(self):
+        """Open-loop optional logging only; never raises into control flow or alters setpoints."""
+        if not self.open_loop:
+            return
+        for name, spec in self.config.raw.get('measurements', {}).items():
+            if not isinstance(spec, dict) or not spec.get('channel'):
+                continue
+            try:
+                sample = self.backend.measure(name)
+                self.emit({'event': 'measurement_log', 'name': name, 'value': sample.value,
+                           'source': sample.source, 'logging_only': True, 'simulated': not self.physical})
+            except Exception as exc:
+                self.emit({'event': 'measurement_log_failed', 'name': name, 'error': str(exc),
+                           'logging_only': True})
 
     def require_true(self, name):
         if self.sample(name) is not True:
@@ -169,8 +185,10 @@ class Dispatcher:
     def motor_interlocks(self, profile):
         interlocks = self.config.raw['interlocks']
         self.verify(SUPPLY)
-        if not math.isclose(self.states[SUPPLY].value, interlocks['motor_supply_demand_v'], abs_tol=1e-6, rel_tol=0):
-            raise InterlockError('Supply demand readback is not the configured motor prerequisite')
+        if interlocks.get('require_supply_demand_before_motor', True):
+            if not math.isclose(self.states[SUPPLY].value, interlocks['motor_supply_demand_v'],
+                                abs_tol=1e-6, rel_tol=0):
+                raise InterlockError('Supply demand readback is not the configured motor prerequisite')
         if self.open_loop:
             return
         requirement = profile.requires.get('measured_bus_voltage', {})
@@ -207,6 +225,7 @@ class Dispatcher:
                 self.motor_interlocks(profile)
         if requested.get('motor_neutral') or profile.requires.get('motor_neutral'):
             self.motor_neutral()
+        # Optional legacy guard — open-loop supply ramps may start from any valid setpoint.
         if requested.get('current_aout_must_be_zero_or_already_target') or requested.get('reject_other_start_values'):
             current = self.verify(profile.output)
             if not any(math.isclose(current, value, abs_tol=1e-6, rel_tol=0)
@@ -221,13 +240,19 @@ class Dispatcher:
             measured = {name: self.sample(name) for name in self.config.raw.get('measurements', {})}
             value = number(controller.correct(role, value, measured), 'corrected setpoint',
                            spec['min_aout_v'], spec['max_aout_v'])
+        else:
+            self.log_measurements()
         self.context(role)
         self.emit({'event': 'write_attempt', 'simulated': not self.physical, 'output': role,
                    'requested_v': value, 'owner': self.active_profile, 'control_mode': self.config.mode})
         self.backend.write(role, value)
         self.verify(role, value)
         self.states[role].value = value
-        self.states[role].held_by = self.active_profile if value != spec.get('neutral_aout_v', 0) else None
+        # Supply hold_final persists demand; motor returns to neutral when commanded there.
+        if role == SUPPLY:
+            self.states[role].held_by = self.active_profile
+        else:
+            self.states[role].held_by = None if value == spec.get('neutral_aout_v', 0) else self.active_profile
         self.emit({'event': 'setpoint_ack', 'simulated': not self.physical, 'output': role, 'readback_v': value})
 
     def compile(self, profile):
@@ -444,13 +469,14 @@ class Dispatcher:
 
 
 def run_dispatch_cli(args):
-    from .schema import load_dispatcher_config, confirm_demo_outputs, confirm_physical_outputs
+    from .schema import load_dispatcher_config, confirm_outputs
 
     config = load_dispatcher_config(args.bindings)
     physical = config.physical
-    if not physical and (getattr(args, 'confirm_physical_output', []) or
-                         getattr(args, 'confirm_hardware_interlocks', False)):
-        raise ValueError('Physical confirmations require physical oxygen_scpi outputs')
+    confirmed = list(getattr(args, 'confirm_output', None) or [])
+    # Accept legacy flag names as aliases for the unified --confirm-output list.
+    confirmed.extend(getattr(args, 'confirm_demo_output', None) or [])
+    confirmed.extend(getattr(args, 'confirm_physical_output', None) or [])
     if args.live and not physical:
         raise ValueError('--live requires physical oxygen_scpi authorization')
     if config.transport != 'memory' and getattr(args, 'scenario', None):
@@ -458,17 +484,14 @@ def run_dispatch_cli(args):
     triggers = {a['name']: a['trigger'] for a in config.raw['assignments'] if a.get('enabled', True)}
     events = load_scenario(args.scenario, config.raw.get('measurements', {}), triggers.values()) if getattr(args, 'scenario', None) else []
     if args.execute:
-        if physical:
-            if args.confirm_simulated_output or getattr(args, 'confirm_demo_output', []):
-                raise ValueError('Hardware execution cannot use simulated/demo output confirmations')
-            confirm_physical_outputs(config, getattr(args, 'confirm_physical_output', []), live=args.live,
-                                     interlocks_confirmed=getattr(args, 'confirm_hardware_interlocks', False))
-        elif config.transport == 'oxygen_scpi':
-            if not args.confirm_simulated_output:
+        if physical and args.confirm_simulated_output:
+            raise ValueError('Physical execution cannot use --confirm-simulated-output')
+        if config.transport == 'oxygen_scpi':
+            if not physical and not args.confirm_simulated_output:
                 raise ValueError('Simulated oxygen_scpi execution requires --confirm-simulated-output')
-            confirm_demo_outputs(config.raw['outputs'], getattr(args, 'confirm_demo_output', []))
+            confirm_outputs(config, confirmed, live=args.live)
         elif not args.confirm_simulated_output:
-            raise ValueError('Execution requires --confirm-simulated-output')
+            raise ValueError('Memory execution requires --confirm-simulated-output')
         if config.transport == 'memory' and not getattr(args, 'scenario', None):
             raise ValueError('Memory execution requires an explicit --scenario')
     plan = {
@@ -525,12 +548,7 @@ def run_dispatch_cli(args):
         emit(plan)
         if config.transport == 'oxygen_scpi':
             from .oxygen_backend import OxygenBackend
-            backend = OxygenBackend(
-                config, emit,
-                confirmed_outputs=(args.confirm_physical_output if physical else args.confirm_demo_output),
-                live=args.live,
-                interlocks_confirmed=getattr(args, 'confirm_hardware_interlocks', False),
-            )
+            backend = OxygenBackend(config, emit, confirmed_outputs=confirmed, live=args.live)
         else:
             backend = MemoryBackend(config, events=events)
         code = Dispatcher(config, backend, emit).run()

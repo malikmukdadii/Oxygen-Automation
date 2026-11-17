@@ -64,6 +64,7 @@
   "measurements": {},
   "interlocks": {
     "motor_supply_demand_v": 0.5,
+    "require_supply_demand_before_motor": true,
     "supply_down_requires_motor_neutral": true,
     "one_active_profile_global": true,
     "external_emergency_stop_required_for_live": true
