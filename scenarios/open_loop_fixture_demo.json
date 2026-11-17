@@ -1,0 +1,13 @@
+{
+  "simulation_only": true,
+  "description": "Open-loop memory scenario: supply hold, motor gentle, supply down. No measurement telemetry.",
+  "events": [
+    {"at_s": 0.5, "buttons": {"DO 3/1 Sim": true}},
+    {"at_s": 1.0, "buttons": {"DO 3/1 Sim": false}},
+    {"at_s": 10.0, "buttons": {"DO 3/4 Sim": true}},
+    {"at_s": 10.5, "buttons": {"DO 3/4 Sim": false}},
+    {"at_s": 20.0, "buttons": {"DO 3/2 Sim": true}},
+    {"at_s": 20.5, "buttons": {"DO 3/2 Sim": false}},
+    {"at_s": 27.0, "stop": true}
+  ]
+}

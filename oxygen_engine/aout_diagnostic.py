@@ -1,11 +1,11 @@
-"""Configured V2 outputs, inspected without output or transfer-configuration writes."""
+"""Configured outputs, inspected without output or transfer-configuration writes."""
 
 import json
 import re
 
 from .adapters.oxygen import OxygenAdapter
 from .aout_discovery import AoutDiscovery
-from .dispatcher_v2_schema import load_v2_config
+from .schema import load_dispatcher_config
 from .scpi_transport import ScpiProtocolError, ScpiTransport, parse_scpi, quote_scpi
 
 
@@ -27,9 +27,9 @@ class AoutDiagnosticTransport(ScpiTransport):
 
 
 def run_aout_diagnostic(args):
-    config = load_v2_config(args.bindings)
-    if config.raw['execution_backend'] not in {'oxygen_demo', 'oxygen_hardware'}:
-        raise ValueError('Use an oxygen_demo or oxygen_hardware V2 configuration for SCPI discovery; memory_fixture stays offline')
+    config = load_dispatcher_config(args.bindings)
+    if config.transport != 'oxygen_scpi':
+        raise ValueError('Use an oxygen_scpi configuration for SCPI discovery; memory stays offline')
     connection = config.raw['connection']
     transport = AoutDiagnosticTransport(host=connection['host'], port=connection['port'],
                                         timeout_s=connection['timeout_s'])

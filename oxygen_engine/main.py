@@ -11,6 +11,8 @@ from pathlib import Path
 from .adapters.oxygen import OxygenAdapter
 from .config import ConfigError, default_example_config, load_config
 from .engine import AutomationEngine
+from .errors import ConfigError as DispatcherConfigError
+from .errors import OxygenAutomationError
 from .logging_setup import Dashboard, DashboardRefresher, JsonlEventLogger, setup_logging
 from .scpi_transport import ScpiTransport
 
@@ -96,27 +98,23 @@ def build_parser() -> argparse.ArgumentParser:
     pattern.add_argument('--max-trigger-gap-ms', type=float, default=250.0,
                          help='Discard trigger edges across stale observations')
 
-    dispatcher = sub.add_parser('dispatch-patterns', help='Validate or run configured DO/profile/AOUT assignments with an explicitly selected backend')
-    dispatcher.add_argument('--bindings', default=str(_project_root() / 'dispatcher.example.json'),
+    dispatcher = sub.add_parser('dispatch-patterns', help='Validate or run schema v3 dual-AOUT dispatcher (open_loop default)')
+    dispatcher.add_argument('--bindings', default=str(_project_root() / 'dispatcher.v3.example.json'),
                             help='Dispatcher JSON file; profile paths are relative to this file')
     dispatcher.add_argument('--execute', action='store_true', help='Run persistently; default validates offline')
     dispatcher.add_argument('--confirm-simulated-output', action='store_true',
-                            help='Confirm simulation-only execution (legacy mode: AO 3/1 Sim is genuinely simulated and unconnected)')
-    dispatcher.add_argument('--log-file', help='Rotating JSONL log; default logs/pattern-dispatcher.jsonl')
-    dispatcher.add_argument('--scenario', help='V2 in-process fixture events only; never used with OXYGEN')
+                            help='Confirm simulation/memory execution (no physical actuation)')
+    dispatcher.add_argument('--log-file', help='Rotating JSONL log; default logs/dispatcher-*.jsonl')
+    dispatcher.add_argument('--scenario', help='Memory transport fixture events only; never used with OXYGEN')
     dispatcher.add_argument('--confirm-demo-output', action='append', default=[], metavar='EXACT_CHANNEL_NAME',
-                            help='OXYGEN demo only: confirm each selected AO is genuinely simulated and unconnected (repeat for both)')
+                            help='Simulated oxygen_scpi: confirm each selected AO is genuinely simulated (repeat for both)')
     dispatcher.add_argument('--confirm-physical-output', action='append', default=[], metavar='EXACT_CHANNEL_NAME',
-                            help='Hardware only: explicitly authorize each configured physical AOUT for this run (repeat for both)')
+                            help='Physical oxygen_scpi: authorize each configured physical AOUT (repeat for both)')
     dispatcher.add_argument('--confirm-hardware-interlocks', action='store_true',
-                            help='Hardware only: acknowledge verified wiring/scaling/neutral, external enables and independent emergency stop')
+                            help='Physical oxygen_scpi: acknowledge verified wiring/scaling/neutral, enables and e-stop')
 
-    migration = sub.add_parser('migrate-dispatcher', help='Back up and migrate an existing dispatcher to schema v2 compatibility')
-    migration.add_argument('--source', required=True, help='Existing unversioned dispatcher JSON')
-    migration.add_argument('--output', required=True, help='New destination file; existing files are never overwritten')
-
-    aout_discovery = sub.add_parser('discover-aout', help='Read-only discovery and validation of both configured V2 AOUTs')
-    aout_discovery.add_argument('--bindings', default=str(_project_root() / 'dispatcher.v2.oxygen-demo.json'))
+    aout_discovery = sub.add_parser('discover-aout', help='Read-only discovery and validation of both configured AOUTs')
+    aout_discovery.add_argument('--bindings', default=str(_project_root() / 'dispatcher.v3.oxygen-demo.example.json'))
 
     sub.add_parser("discover", help="Discover OXYGEN channels and properties")
 
@@ -195,16 +193,9 @@ def cmd_aout_pattern(args: argparse.Namespace) -> int:
 
 
 def cmd_dispatch_patterns(args: argparse.Namespace) -> int:
-    from .pattern_dispatcher import run_dispatcher
+    from .dispatcher import run_dispatch_cli
 
-    return run_dispatcher(args)
-
-
-def cmd_migrate_dispatcher(args: argparse.Namespace) -> int:
-    from .dispatcher_v2_schema import migrate_legacy
-
-    print(json.dumps(migrate_legacy(args.source, args.output), indent=2))
-    return 0
+    return run_dispatch_cli(args)
 
 
 def cmd_discover_aout(args: argparse.Namespace) -> int:
@@ -437,7 +428,6 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(_normalize_argv(argv))
     handlers = {
         "discover-aout": cmd_discover_aout,
-        "migrate-dispatcher": cmd_migrate_dispatcher,
         "dispatch-patterns": cmd_dispatch_patterns,
         "aout-pattern": cmd_aout_pattern,
         "watch-do": cmd_watch_do,
@@ -451,9 +441,12 @@ def main(argv: list[str] | None = None) -> int:
     }
     try:
         return handlers[args.command](args)
-    except ConfigError as exc:
+    except (ConfigError, DispatcherConfigError) as exc:
         print(f"Config error: {exc}", file=sys.stderr)
         return 2
+    except OxygenAutomationError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
     except Exception as exc:  # noqa: BLE001
         print(f"Error: {exc}", file=sys.stderr)
         return 1

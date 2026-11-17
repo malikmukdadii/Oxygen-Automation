@@ -1,0 +1,15 @@
+{
+  "schema_version": 3,
+  "name": "rzxa_ramp_hold",
+  "description": "Open-loop RZ-XA demand: ramp to 0.500 V, hold, persist. Gain documentation 80 V/V; does not enable the supply.",
+  "output": "rzxa_voltage_demand",
+  "timeout_s": 30,
+  "completion": {"mode": "hold_final", "value": 0.5, "operator_action_required_to_stop": true},
+  "requires": {"motor_neutral": true},
+  "steps": [
+    {"type": "assert_preconditions", "params": {"motor_neutral": true, "current_aout_must_be_zero_or_already_target": true, "reject_other_start_values": true}},
+    {"type": "ramp_aout", "params": {"channel": "rzxa_voltage_demand", "target": 0.5, "duration_s": 5.0}},
+    {"type": "hold", "params": {"duration_s": 3.0}},
+    {"type": "checkpoint", "params": {"name": "supply_commanded_hold"}}
+  ]
+}

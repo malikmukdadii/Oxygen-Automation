@@ -1,8 +1,7 @@
-
 {
-  "schema_version": 2,
-  "execution_backend": "oxygen_hardware",
-  "simulation_only": false,
+  "schema_version": 3,
+  "control": {"mode": "open_loop"},
+  "transport": "oxygen_scpi",
   "live_control": {
     "enable_physical_aout": true,
     "enable_rzxa_output_toggle": false,
@@ -10,11 +9,15 @@
     "require_explicit_hardware_authorization": true
   },
   "hardware_authorization": {
-    "wiring_verified": false,
-    "supply_mapping_verified": false,
-    "motor_neutral_verified": false,
-    "external_emergency_stop_verified": false,
-    "external_enable_control_verified": false
+    "wiring_verified": true,
+    "supply_mapping_verified": true,
+    "motor_neutral_verified": true,
+    "external_emergency_stop_verified": true,
+    "external_enable_control_verified": true
+  },
+  "open_loop_authorization": {
+    "no_live_feedback_acknowledged": true,
+    "external_bus_and_regen_protection_verified": true
   },
   "connection": {"host": "127.0.0.1", "port": 10001, "timeout_s": 0.5},
   "outputs": {
@@ -33,9 +36,9 @@
       "max_aout_v": 0.5,
       "startup_aout_v": 0.0,
       "mapping_verified": true,
-      "mapping": {"type": "linear_verified", "gain_bus_v_per_aout_v": null, "verified": true},
+      "mapping": {"type": "linear_verified", "gain_bus_v_per_aout_v": 80.0, "verified": true},
       "output_enable": "EXTERNAL_VERIFIED",
-      "completion_policy": "hold_until_explicit_change",
+      "completion_policy": "hold_final",
       "on_cancel": "preserve_demand",
       "on_fault": "preserve_demand",
       "on_shutdown": "preserve_demand"
@@ -63,33 +66,19 @@
     }
   },
   "timing": {"poll_ms": 100, "max_trigger_gap_ms": 1000, "interval_ms": 250, "max_lateness_ms": 1000},
-  "measurement_roles": {
-    "dc_bus_voltage": {"kind": "number", "unit": "V", "channel": null, "mapping_verified": false},
-    "motor_input_mapping_verified": {"kind": "boolean", "channel": null, "property": null, "mapping_verified": false},
-    "motor_physical_disable_verified": {"kind": "boolean", "channel": null, "property": null, "mapping_verified": false},
-    "supply_external_ready": {"kind": "boolean", "channel": null, "property": null, "mapping_verified": false},
-    "regen_safe": {"kind": "boolean", "channel": null, "property": null, "mapping_verified": false},
-    "supply_shutdown_permitted": {"kind": "boolean", "channel": null, "property": null, "mapping_verified": false},
-    "supply_standalone_test": {"kind": "boolean", "channel": null, "property": null, "mapping_verified": false},
-    "supply_disabled": {"kind": "boolean", "channel": null, "property": null, "mapping_verified": false}
-  },
+  "measurements": {},
   "interlocks": {
-    "bus_target_v": 40.0,
-    "bus_tolerance_v": 2.0,
-    "max_feedback_age_s": 1.0,
     "motor_supply_demand_v": 0.5,
-    "motor_requires_measured_bus_in_range": true,
     "supply_down_requires_motor_neutral": true,
     "one_active_profile_global": true,
-    "allow_unverified_simulated_interlock_values": false,
-    "allow_unverified_live_interlock_values": false,
     "external_emergency_stop_required_for_live": true
   },
   "recording": {"enabled": false, "markers": true},
   "instruments": {"rzxa": {"adapter": "disabled", "enable_output_control": false}},
   "assignments": [
-    {"name": "rzxa_to_40_hold", "enabled": true, "trigger": "Ramp Enable", "output": "rzxa_voltage_demand", "profile": "profiles/hardware/rzxa_ramp_hold.json"},
-    {"name": "rzxa_down", "enabled": true, "trigger": "Ramp Disable", "output": "rzxa_voltage_demand", "profile": "profiles/hardware/rzxa_ramp_down.json"},
-    {"name": "motor_gentle", "enabled": true, "trigger": "Motor Gentle", "output": "vesc_throttle", "profile": "profiles/hardware/motor_gentle.json"}
-  ]
+    {"name": "rzxa_to_40_hold", "enabled": true, "trigger": "Ramp Enable", "output": "rzxa_voltage_demand", "profile": "profiles/rzxa_ramp_hold.json"},
+    {"name": "rzxa_down", "enabled": true, "trigger": "Ramp Disable", "output": "rzxa_voltage_demand", "profile": "profiles/rzxa_ramp_down.json"},
+    {"name": "motor_gentle", "enabled": true, "trigger": "Motor Gentle", "output": "vesc_throttle", "profile": "profiles/motor_gentle.json"}
+  ],
+  "simulation": {}
 }
