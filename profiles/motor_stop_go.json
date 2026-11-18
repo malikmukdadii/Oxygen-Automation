@@ -1,7 +1,7 @@
 {
   "schema_version": 3,
   "name": "motor_stop_go",
-  "description": "LEGACY ZERO-DEMAND MAPPING ONLY: historical 0.20/0.35 V pulses ending at 0 V. On the CES VESC these levels are not a commissioned acceleration/coast sequence and 0 V produced braking. Do not deploy on that rig. Revised, uncommissioned memory-only replacement: profiles/ces/motor_stop_go.json.",
+  "description": "LEGACY ZERO-DEMAND MAPPING ONLY: historical 0.20/0.35 V AOUT-demand pulses ending at 0 V normal stop demand. Voltage-to-current mapping is not calibrated; low positive demand is not a demonstrated braking region or coast command. Demand is not regulated RPM, and normal stopping does not qualify fault safety or regeneration. Waveform retained for compatibility, not newly commissioned. Revised staged candidate: profiles/ces/motor_stop_go.json.",
   "output": "vesc_throttle",
   "timeout_s": 30,
   "completion": {"mode": "return_neutral", "value": 0.0},

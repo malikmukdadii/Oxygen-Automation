@@ -5,10 +5,11 @@ Simulated and physical ConstOutput channels share one discovery, timeline, SCPI 
 
 **Verified scale:** 1.000 V AOUT = 80 V bus (`gain_bus_v_per_aout_v: 80`).
 
-**CES motor commissioning hold:** physical testing found 0 V drive demand causes braking,
-not coast. The local motor-neutral acknowledgement is invalidated and motor buttons disabled;
-physical dispatch is blocked pending review. Revised 10/18/24/22-second profiles are staged
-for **memory-only** rehearsal, not live use. See [CES motor commissioning](docs/ces-motor-profile-commissioning.md).
+**CES current-control commissioning hold:** 0 V is the intended normal stop demand; 0.3 V
+requests positive current, not coast. Constant demand is not regulated speed, and normal
+deceleration is not proof of regeneration or fault safety. The local acknowledgement and
+disabled motor assignments remain unchanged pending review. The 10/18/24/22-second profiles
+are staged for **memory-only** rehearsal, not live use. See [CES motor commissioning](docs/ces-motor-profile-commissioning.md).
 
 ## Operator config
 
@@ -27,7 +28,7 @@ Illustrative variants live under `examples/` and must not be confused with the a
 | `dispatcher.example.json` | Committed starter (memory dual-output) |
 | `examples/memory-dual.json` | Offline dual-output fixture |
 | `examples/ces-eight-button.json` | Offline eight-button CES example; relative RZ-XA demand stepping |
-| `examples/ces-motor-commissioning.json` | Memory-only revised motor candidates; hypothetical 0.30 V coast / 1.00 V max |
+| `examples/ces-motor-commissioning.json` | Memory-only current-demand candidates; 0 V normal stop / staged 1.00 V max |
 | `examples/supply-only.json` | Supply-only RZ-XA commissioning |
 | `examples/oxygen-demo.json` | Simulated OXYGEN demo |
 | `examples/physical-dual.json` | Physical dual-output template |
@@ -75,11 +76,12 @@ python -m venv .venv-scpi
 
 ## Profiles
 
-The root motor profiles below retain their historical zero-neutral waveforms for compatibility;
-they are **not commissioned for the observed CES VESC mapping**. Staged replacements under
-`profiles/ces/` use the actual V3 schema, a modeled 0.30 V coast point, explicit braking phases,
-and higher drive demands. They cannot load under the physical neutral contract. No RZ-XA
-profile or physical voltage limit is raised by selecting the memory example.
+The root motor profiles below retain their historical waveforms for compatibility; normal
+completion at 0 V is a stop-demand command, not coast or a safety guarantee. Staged replacements
+under `profiles/ces/` use the actual V3 schema, positive current-demand bursts and zero-demand
+deceleration windows. Their peaks exceed the current 0.40 V physical clamp and remain
+uncommissioned. No RZ-XA profile or physical voltage limit is raised by selecting the memory
+example; the local operator file is not overwritten or enabled.
 
 | Profile | Role |
 |---------|------|
@@ -93,7 +95,7 @@ profile or physical voltage limit is raised by selecting the memory example.
 | `profiles/motor_cruise.json` | Multi-level cruise |
 | `profiles/motor_repeat.json` | Repeated gentle pulses |
 | `profiles/motor_step_response.json` | Extended demand-level characterization |
-| `profiles/motor_coast_compare.json` | Matched demand trials with fast/slow release and neutral observation |
+| `profiles/motor_coast_compare.json` | Historical demand trials with fast/slow release to zero-demand stop observation |
 
 See [open-loop experiments](docs/open-loop-experiments.md) for durations, suggested existing DOUT
 assignments, measurement interpretation and the inspected local enable flags. Disabled assignments
@@ -115,7 +117,7 @@ assignments. Only one dispatcher/experiment CLI may own an OXYGEN endpoint at a 
 - `experiments/dc_ac_grid.example.json`: 36/38/40 V bus targets; 0.25/0.35 V drive enabled.
   The planned 0.45/0.55 V candidates remain disabled above today's 0.40 V clamp.
 - `experiments/dynamic_motor.example.json`: bounded acceleration/current-demand plateaus and
-  neutral coast observation; no active braking or regulated speed claim.
+  zero-demand observation; no proven zero-torque coast, regeneration or regulated speed claim.
 
 ```powershell
 # Offline preview; no connection

@@ -1,7 +1,7 @@
 {
   "schema_version": 3,
   "name": "motor_three_level",
-  "description": "LEGACY ZERO-DEMAND MAPPING ONLY: historical 0.12/0.20/0.28 V plateaus, ending at 0 V. Those plateaus are below the observed useful acceleration region on the CES VESC; 0 V produced braking. Do not deploy on that rig. Revised four-point, uncommissioned memory-only replacement: profiles/ces/motor_three_level.json.",
+  "description": "LEGACY ZERO-DEMAND MAPPING ONLY: historical 0.12/0.20/0.28 V AOUT-demand plateaus ending at 0 V normal stop demand. Voltage-to-current mapping is not calibrated. Positive current demand can continue accelerating; these are not fixed RPM points or evidence of efficiency. Normal stopping does not qualify fault safety or regeneration. Waveform retained for compatibility, not newly commissioned. Revised four-point staged candidate: profiles/ces/motor_three_level.json.",
   "output": "vesc_throttle",
   "timeout_s": 45,
   "completion": {

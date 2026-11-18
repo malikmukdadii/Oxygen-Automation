@@ -1,4 +1,4 @@
-"""Staged CES motor waveforms; hypotheses are tested only with a memory backend."""
+"""Staged CES current-demand waveforms; no physical RPM or regeneration model."""
 
 import json
 from pathlib import Path
@@ -11,17 +11,18 @@ from oxygen_engine.errors import ConfigError, ControlError, InterlockError
 from oxygen_engine.main import main
 from oxygen_engine.memory_backend import MemoryBackend, load_scenario
 from oxygen_engine.schema import load_dispatcher_config
+from oxygen_engine.scpi_transport import ScpiCommandError, ScpiErrorEntry
 
 ROOT = Path(__file__).resolve().parents[1]
 EXAMPLE = ROOT / 'examples/ces-motor-commissioning.json'
 EXPECTED = {
-    'motor_gentle': [(3, .6), (4, .6), (3, .3)],
-    'regen_test': [(4, .8), (4, .8), (2, .3), (2, .3), (1, .1), (2, .1), (1, .3), (2, .3)],
-    'driving_cycle': [(2, .4), (2, .4), (1, .3), (1, .3),
-                      (2, .6), (2, .6), (1, .15), (1, .15), (1, .3), (1, .3),
-                      (2, .8), (3, .8), (1, .1), (2, .1), (1, .3), (1, .3)],
+    'motor_gentle': [(3, .6), (4, .6), (3, 0)],
+    'regen_test': [(3, 1.0), (4, 1.0), (1, 0), (10, 0)],
+    'driving_cycle': [(2, .4), (2, .4), (1, 0), (2, 0),
+                      (2, .6), (2, .6), (1, 0), (2, 0),
+                      (2, 1.0), (3, 1.0), (1, 0), (4, 0)],
     'efficiency_scan': [(1, .4), (4, .4), (1, .6), (4, .6),
-                        (1, .8), (4, .8), (1, 1.0), (4, 1.0), (2, .3)],
+                        (1, .8), (4, .8), (1, 1.0), (4, 1.0), (2, 0)],
 }
 DURATIONS = {'motor_gentle': 10, 'regen_test': 18, 'driving_cycle': 24, 'efficiency_scan': 22}
 BUTTONS = ['Ramp Enable', 'Ramp Disable', 'Motor Gentle', 'Run Regen Test',
@@ -75,54 +76,68 @@ def test_waveform_bounds_timing_transitions_completion_and_repeatability(tmp_pat
     pattern, checkpoints = dispatcher.compile(profile)
     assert [(s.end_s - s.start_s, s.end_v) for s in pattern.segments] == EXPECTED[name]
     assert pattern.duration_s == DURATIONS[name]
-    assert pattern.segments[0].start_v == .3
-    assert pattern.value_at(pattern.duration_s) == .3
+    assert pattern.segments[0].start_v == 0
+    assert pattern.value_at(pattern.duration_s) == 0
     for previous, following in zip(pattern.segments, pattern.segments[1:]):
         assert previous.end_s == following.start_s
         assert previous.end_v == following.start_v
-    assert all(0.1 <= s.start_v <= 1.0 and .1 <= s.end_v <= 1.0 for s in pattern.segments)
-    assert profile.completion == {'mode': 'return_neutral', 'value': .3}
+    assert all(0 <= s.start_v <= 1.0 and 0 <= s.end_v <= 1.0 for s in pattern.segments)
+    assert profile.completion == {'mode': 'return_neutral', 'value': 0}
     for iteration in range(2):
         began = len(records)
         dispatcher.execute_profile(name)
         assert clock() == pytest.approx((iteration + 1) * DURATIONS[name])
-        assert dispatcher.states[MOTOR].value == .3
+        assert dispatcher.states[MOTOR].value == 0
         assert dispatcher.states[MOTOR].held_by is None
         assert dispatcher.states[SUPPLY].value == .5
         assert [r['name'] for r in records[began:] if r['event'] == 'checkpoint'] == [c for _, c in checkpoints]
-    assert all(role == MOTOR and .1 <= value <= 1.0 for _, role, value in backend.commands)
+    assert all(role == MOTOR and 0 <= value <= 1.0 for _, role, value in backend.commands)
     assert dispatcher.cleanup()
-    assert backend.commands[-1] == ('write', MOTOR, .3)
+    assert backend.commands[-1] == ('write', MOTOR, 0)
     assert not any(role == SUPPLY for _, role, _ in backend.commands)
     assert not any(r['event'] == 'independent_feedback' for r in records)
 
 
-def test_gentle_has_no_braking_and_scan_has_four_long_holds(tmp_path):
+def test_gentle_uses_modest_current_and_scan_has_four_equal_observation_windows(tmp_path):
     dispatcher, _, _, _ = setup(tmp_path)
     gentle = dispatcher.config.profiles['motor_gentle']
-    assert all(step['params']['target'] >= .3 for step in gentle.steps if step['type'] == 'ramp_aout')
+    assert [s['params']['target'] for s in gentle.steps if s['type'] == 'ramp_aout'] == [.6, 0]
     scan = dispatcher.config.profiles['efficiency_scan']
-    assert [s['params']['target'] for s in scan.steps if s['type'] == 'ramp_aout'] == [.4, .6, .8, 1.0, .3]
+    assert [s['params']['target'] for s in scan.steps if s['type'] == 'ramp_aout'] == [.4, .6, .8, 1.0, 0]
     assert [s['params']['duration_s'] for s in scan.steps if s['type'] == 'hold'] == [4] * 4
-    assert not any(step['params'].get('target', .3) < .3 for step in scan.steps)
+    for profile in dispatcher.config.profiles.values():
+        if profile.output == MOTOR:
+            assert not any('coast' in s['params']['name'] or 'brake' in s['params']['name']
+                           for s in profile.steps if s['type'] == 'checkpoint')
 
 
-def test_regen_has_distinct_coast_and_brake_request_checkpoints(tmp_path):
+def test_regen_has_exact_acceleration_and_deceleration_measurement_windows(tmp_path):
     dispatcher, backend, _, records = setup(tmp_path)
     backend.connect()
     dispatcher.prepare()
+    _, checkpoints = dispatcher.compile(dispatcher.config.profiles['regen_test'])
+    assert dict((name, at) for at, name in checkpoints) == {
+        'candidate_acceleration_window_begin': 0,
+        'candidate_acceleration_window_end': 3,
+        'candidate_current_100_hold_begin': 3,
+        'candidate_deceleration_window_begin': 7,
+        'candidate_zero_demand_observation_begin': 8,
+        'candidate_deceleration_window_end': 18,
+        'candidate_regen_complete': 18,
+    }
     dispatcher.execute_profile('regen_test')
     names = [r['name'] for r in records if r['event'] == 'checkpoint']
-    assert names.index('candidate_regen_drive_080_begin') < names.index('candidate_regen_coast_begin')
-    assert names.index('candidate_regen_coast_begin') < names.index('candidate_regen_brake_request_begin')
-    assert names.index('candidate_regen_brake_request_begin') < names.index('candidate_regen_brake_release_begin')
-    assert ('write', MOTOR, .1) in backend.commands
+    assert names.index('candidate_acceleration_window_begin') < names.index('candidate_acceleration_window_end')
+    assert names.index('candidate_acceleration_window_end') < names.index('candidate_deceleration_window_begin')
+    assert names.index('candidate_deceleration_window_begin') < names.index('candidate_deceleration_window_end')
+    assert ('write', MOTOR, 1.0) in backend.commands
+    assert backend.commands[-1] == ('write', MOTOR, 0)
     assert records[-1]['outputs'][MOTOR]['physical_voltage_established'] is False
 
 
 @pytest.mark.parametrize('name', EXPECTED)
 @pytest.mark.parametrize('failure', ['cancel', 'fault'])
-def test_interrupt_cleanup_is_modeled_coast_not_physical_fault_authorization(tmp_path, monkeypatch, name, failure):
+def test_interrupt_attempts_zero_demand_cleanup_not_physical_fault_authorization(tmp_path, monkeypatch, name, failure):
     dispatcher, backend, clock, records = setup(tmp_path)
     original_wait = clock.wait
     fired = False
@@ -140,15 +155,15 @@ def test_interrupt_cleanup_is_modeled_coast_not_physical_fault_authorization(tmp
     monkeypatch.setattr(dispatcher, 'monitor', lambda: dispatcher.execute_profile(name))
     assert dispatcher.run() == (130 if failure == 'cancel' else 1)
     assert dispatcher.completed == 0
-    assert backend.commands[-1] == ('write', MOTOR, .3)
+    assert backend.commands[-1] == ('write', MOTOR, 0)
     assert dispatcher.states[MOTOR].status == 'readback_verified'
     assert dispatcher.states[SUPPLY].value == .5
     assert not any(role == SUPPLY for _, role, _ in backend.commands)
     assert records[-1]['physical_actuation'] is False
 
 
-@pytest.mark.parametrize('name,at_s', [('regen_test', 13.5), ('driving_cycle', 20.5)])
-def test_cancel_during_braking_returns_to_modeled_coast(tmp_path, monkeypatch, name, at_s):
+@pytest.mark.parametrize('name,at_s', [('regen_test', 8.5), ('driving_cycle', 20.5)])
+def test_cancel_during_deceleration_observation_keeps_zero_demand(tmp_path, monkeypatch, name, at_s):
     dispatcher, backend, clock, _ = setup(tmp_path)
 
     def wait(seconds):
@@ -159,11 +174,12 @@ def test_cancel_during_braking_returns_to_modeled_coast(tmp_path, monkeypatch, n
     monkeypatch.setattr(dispatcher, 'wait', wait)
     monkeypatch.setattr(dispatcher, 'monitor', lambda: dispatcher.execute_profile(name))
     assert dispatcher.run() == 130
-    assert backend.commands[-1] == ('write', MOTOR, .3)
-    assert any(value < .3 for _, role, value in backend.commands if role == MOTOR)
+    assert backend.commands[-1] == ('write', MOTOR, 0)
+    assert any(value > .4 for _, role, value in backend.commands if role == MOTOR)
+    assert dispatcher.completed == 0
 
 
-def test_communication_loss_is_unknown_no_reconnect_or_guessed_coast_write(tmp_path, monkeypatch):
+def test_communication_loss_is_unknown_no_reconnect_or_guessed_stop_write(tmp_path, monkeypatch):
     dispatcher, backend, clock, records = setup(tmp_path)
     original_connect = backend.connect
     connections = []
@@ -186,12 +202,12 @@ def test_communication_loss_is_unknown_no_reconnect_or_guessed_coast_write(tmp_p
     assert dispatcher.states[MOTOR].status == 'unknown'
     assert records[-1]['status'] == 'cleanup_unknown'
     assert any(r['event'] == 'motor_neutral_unknown' for r in records)
-    assert backend.commands[-1][2] > .3
+    assert backend.commands[-1][2] > 0
 
 
-def test_memory_startup_requires_modeled_neutral_without_initial_jump(tmp_path):
+def test_positive_point_three_demand_is_not_a_stopped_startup_condition(tmp_path):
     raw = raw_config()
-    raw['simulation']['outputs']['motor_throttle_fixture']['initial_v'] = 0
+    raw['simulation']['outputs']['motor_throttle_fixture']['initial_v'] = .3
     dispatcher, backend, _, _ = setup(tmp_path, raw)
     backend.connect()
     with pytest.raises(ControlError, match='not neutral'):
@@ -213,14 +229,14 @@ def test_existing_supply_prerequisite_still_applies(tmp_path, supply):
     assert backend.writes_attempted == 0
 
 
-def test_supply_steps_use_modeled_neutral_and_do_not_confuse_it_with_stopped_motion(tmp_path):
+def test_supply_steps_require_zero_demand_without_proving_stopped_motion(tmp_path):
     dispatcher, backend, _, _ = setup(tmp_path)
     backend.connect()
     dispatcher.prepare()
     dispatcher.execute_profile('rzxa_voltage_down')
     assert backend.commands[-1] == ('write', SUPPLY, .49375)
-    assert dispatcher.states[MOTOR].value == .3
-    backend.outputs['motor_throttle_fixture']['value'] = .4
+    assert dispatcher.states[MOTOR].value == 0
+    backend.outputs['motor_throttle_fixture']['value'] = .3
     before = len(backend.commands)
     with pytest.raises(ControlError):
         dispatcher.execute_profile('rzxa_voltage_down')
@@ -228,16 +244,16 @@ def test_supply_steps_use_modeled_neutral_and_do_not_confuse_it_with_stopped_mot
 
 
 @pytest.mark.parametrize('name', EXPECTED)
-def test_candidate_cannot_be_loaded_under_legacy_physical_zero_neutral(tmp_path, name):
+def test_candidate_rejected_above_unchanged_physical_point_four_limit(tmp_path, name):
     raw = json.loads((ROOT / 'examples/physical-dual.json').read_text())
     assignment = next(a for a in raw_config()['assignments'] if a['name'] == name)
     raw['assignments'] = [assignment]
-    with pytest.raises(ConfigError, match='completion value|target|Neutral/zero'):
+    with pytest.raises(ConfigError, match='target'):
         load(tmp_path, raw)
 
 
-def test_nonzero_neutral_is_not_enabled_for_real_or_oxygen_simulated_outputs(tmp_path):
-    for example in ['physical-dual.json', 'oxygen-demo.json']:
+def test_point_three_cannot_be_configured_as_normal_stop_for_any_transport(tmp_path):
+    for example in ['physical-dual.json', 'oxygen-demo.json', 'ces-motor-commissioning.json']:
         raw = json.loads((ROOT / 'examples' / example).read_text())
         raw['outputs'][MOTOR]['neutral_aout_v'] = .3
         with pytest.raises(ConfigError, match='motor neutral'):
@@ -268,12 +284,78 @@ def test_lower_commissioning_stage_rejects_scan_before_connection(tmp_path):
         load(tmp_path, raw)
 
 
+@pytest.mark.parametrize('authorized', [False, True])
+def test_hypothetical_one_point_six_stage_requires_explicit_authorization(tmp_path, authorized):
+    raw = raw_config()
+    raw['outputs'][MOTOR].update(max_aout_v=1.6, commissioned_drive_limit_v=1.6,
+                                 higher_drive_limit_authorized=authorized)
+    raw['simulation']['outputs']['motor_throttle_fixture']['max_v'] = 1.6
+    profile = json.loads((ROOT / 'profiles/ces/motor_three_level.json').read_text())
+    ramp = next(s for s in profile['steps'] if s['type'] == 'ramp_aout' and s['params']['target'] == 1.0)
+    ramp['params']['target'] = 1.6
+    path = tmp_path / 'hypothetical-stage.json'
+    path.write_text(json.dumps(profile))
+    raw['assignments'][5]['profile'] = str(path)
+    if not authorized:
+        with pytest.raises(ConfigError, match='higher_drive_limit_authorized'):
+            load(tmp_path, raw)
+        return
+    dispatcher, backend, _, _ = setup(tmp_path, raw)
+    backend.connect()
+    dispatcher.prepare()
+    dispatcher.execute_profile('efficiency_scan')
+    assert ('write', MOTOR, 1.6) in backend.commands
+    assert backend.commands[-1] == ('write', MOTOR, 0)
+    assert not dispatcher.physical
+    assert not any(role == SUPPLY for _, role, _ in backend.commands)
+
+
+def test_higher_physical_stage_does_not_replace_required_stop_acknowledgement(tmp_path):
+    raw = json.loads((ROOT / 'examples/physical-dual.json').read_text())
+    raw['assignments'] = [next(a for a in raw_config()['assignments'] if a['name'] == 'motor_gentle')]
+    raw['outputs'][MOTOR].update(max_aout_v=.6, commissioned_drive_limit_v=.6,
+                                 higher_drive_limit_authorized=False)
+    with pytest.raises(ConfigError, match='higher_drive_limit_authorized'):
+        load(tmp_path, raw)
+    raw['outputs'][MOTOR]['higher_drive_limit_authorized'] = True
+    assert load(tmp_path, raw).profiles['motor_gentle'].completion['value'] == 0
+    raw['outputs'][MOTOR]['neutral_verified'] = False
+    with pytest.raises(ConfigError, match='verified 0 V neutral'):
+        load(tmp_path, raw)
+
+
+def test_failed_profile_command_is_not_retried_before_zero_demand_cleanup(tmp_path, monkeypatch):
+    dispatcher, backend, _, records = setup(tmp_path)
+    original_write = backend.write
+    attempts, failed = [], []
+
+    def write(role, value):
+        attempts.append((role, value))
+        if role == MOTOR and value >= .4 and not failed:
+            failed.append((role, value))
+            raise ScpiCommandError('simulated current-demand write', ScpiErrorEntry(-200, 'Execution error'))
+        original_write(role, value)
+
+    monkeypatch.setattr(backend, 'write', write)
+    monkeypatch.setattr(dispatcher, 'monitor', lambda: dispatcher.execute_profile('regen_test'))
+    assert dispatcher.run() == 1
+    assert attempts.count(failed[0]) == 1
+    assert attempts[-1] == (MOTOR, 0)
+    assert dispatcher.completed == 0
+    interrupted = next(r for r in records if r['event'] == 'profile_interrupted_state')
+    assert interrupted['outputs'][MOTOR]['status'] == 'unknown'
+    failure = next(r for r in records if r['event'] == 'output_command_failed')
+    assert failure['retry_attempted'] is False
+    assert '-200' in failure['error']
+    assert not any(role == SUPPLY for role, _ in attempts)
+
+
 def test_wrong_completion_and_non_neutral_initial_setpoint_rejected(tmp_path):
     for field in ['completion', 'initial']:
         raw = raw_config()
         profile = json.loads((ROOT / 'profiles/ces/motor_gentle.json').read_text())
         if field == 'completion':
-            profile['completion']['value'] = 0
+            profile['completion']['value'] = .3
         else:
             profile['steps'][1]['params']['value'] = .4
         path = tmp_path / 'bad-profile.json'
@@ -321,7 +403,7 @@ def test_button_rehearsal_completes_four_profiles_without_supply_writes(tmp_path
     completed = [r for r in records if r['event'] == 'pattern_cycle_complete']
     assert [r['assignment'] for r in completed] == list(EXPECTED)
     assert dispatcher.completed == 4
-    assert backend.commands[-1] == ('write', MOTOR, .3)
+    assert backend.commands[-1] == ('write', MOTOR, 0)
     assert not any(role == SUPPLY for _, role, _ in backend.commands)
 
 

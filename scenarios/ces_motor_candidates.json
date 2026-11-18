@@ -1,6 +1,6 @@
 {
   "simulation_only": true,
-  "description": "FAKE memory-only CES motor candidate rehearsal, using exact operator button labels. Not a physical motor/coast/regen validation.",
+  "description": "FAKE memory-only CES current-demand candidate rehearsal, using exact operator button labels. Zero-demand normal completion is not validation of physical stopping, fault safety, RPM, or regeneration.",
   "events": [
     {"at_s": 0.2, "buttons": {"Motor Gentle": true}},
     {"at_s": 0.4, "buttons": {"Motor Gentle": false}},

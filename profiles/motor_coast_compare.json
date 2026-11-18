@@ -1,7 +1,7 @@
 {
   "schema_version": 3,
   "name": "motor_coast_compare",
-  "description": "LEGACY ZERO-DEMAND MAPPING ONLY: historical 0.25 V trials ending at 0 V. On the CES VESC, 0 V produced strong braking, not coast; this is neither a verified coasting trial nor proof of regeneration. Do not deploy on that rig. Revised, uncommissioned memory-only replacement: profiles/ces/motor_coast_compare.json.",
+  "description": "LEGACY ZERO-DEMAND MAPPING ONLY: historical 0.25 V AOUT-demand trials ending at 0 V normal stop demand. The filename does not establish coast: 0.3 V still requests positive current and 0 V requests normal deceleration. Neither deceleration nor the filename proves regeneration or fault safety. Voltage-to-current mapping is not calibrated. Waveform retained for compatibility, not newly commissioned. Revised staged candidate: profiles/ces/motor_coast_compare.json.",
   "output": "vesc_throttle",
   "timeout_s": 65,
   "completion": {"mode": "return_neutral", "value": 0.0},

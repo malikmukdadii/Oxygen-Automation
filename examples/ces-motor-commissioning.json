@@ -41,7 +41,7 @@
     "vesc_throttle": {
       "role": "motor_throttle",
       "channel": null,
-      "display_name": "FAKE CES motor candidate; 0.30 V coast and 1.00 V ceiling are NOT physical approvals",
+      "display_name": "FAKE CES current-demand candidate; 0 V normal stop is NOT a fault-safety approval; 1.00 V ceiling is rehearsal only",
       "expected_id": null,
       "channel_discovery_required": true,
       "binding": "motor_throttle_fixture",
@@ -53,7 +53,7 @@
       "max_aout_v": 1.0,
       "commissioned_drive_limit_v": 1.0,
       "higher_drive_limit_authorized": true,
-      "neutral_aout_v": 0.3,
+      "neutral_aout_v": 0.0,
       "neutral_verified": false,
       "mapping_verified": false,
       "completion_policy": "return_neutral",
@@ -95,7 +95,7 @@
       "motor_throttle_fixture": {
         "name": "FAKE motor throttle", "id": "102",
         "mode": "ConstOutput", "source": "CONST0", "property": "TRION/SourceChannel_A_CONST/Const0",
-        "unit": "V", "min_v": 0.0, "max_v": 1.0, "initial_v": 0.3
+        "unit": "V", "min_v": 0.0, "max_v": 1.0, "initial_v": 0.0
       }
     },
     "sample_interval_s": 0.1,
