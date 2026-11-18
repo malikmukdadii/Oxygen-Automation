@@ -51,6 +51,11 @@ python -m venv .venv-scpi
 .\.venv-scpi\Scripts\python.exe -m oxygen_engine discover-aout --bindings examples/oxygen-demo.json
 .\.venv-scpi\Scripts\python.exe -m oxygen_engine watch-do --channel "DO 3/1 Sim"
 .\.venv-scpi\Scripts\python.exe -m oxygen_engine list-profiles
+
+# Regenerative deceleration experiment (offline; extends V3 write path)
+.\.venv-scpi\Scripts\python.exe -m oxygen_engine run-experiment --experiment experiments/regen_release_comparison.example.json
+.\.venv-scpi\Scripts\python.exe -m oxygen_engine run-experiment --experiment experiments/regen_release_comparison.example.json --execute --confirm-simulated-output
+.\.venv-scpi\Scripts\python.exe -m oxygen_engine analyze-regen-csv --csv path\to\sync.csv --simulated
 ```
 
 ## Control model
@@ -85,8 +90,11 @@ assignments, measurement interpretation and the inspected local enable flags. Di
 are not polled. Startup diagnostics list both enabled and disabled entries, exact AOUT mappings and
 voltage limits. Active profiles pause DOUT polling; busy pulses can be unobservable and are not queued.
 
-[Future coordinated regeneration](docs/regenerative-extension-plan.md) is a design/commissioning
-plan only. `Braking Control` is not active; no brake role or coordinated playback is implemented.
+Regenerative deceleration (`run-experiment`, phases A–F) reuses the V3 dispatcher write path,
+lease, logging and commissioned drive limits. See
+[regenerative deceleration commissioning](docs/regenerative-deceleration-commissioning.md).
+`Braking Control` remains unused. [Future ADC2 braking](docs/regenerative-extension-plan.md) is
+still design-only.
 
 ## Tests
 

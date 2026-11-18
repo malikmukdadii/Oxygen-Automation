@@ -102,6 +102,30 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     sub.add_parser('list-profiles', help='List JSON profiles under ./profiles (no engine lifecycle)')
+
+    experiment = sub.add_parser(
+        'run-experiment',
+        help='Validate or run a regenerative_deceleration experiment on the V3 dispatcher write path',
+    )
+    experiment.add_argument('--experiment', required=True, help='Experiment JSON path')
+    experiment.add_argument(
+        '--bindings',
+        help='Dispatcher JSON override (default: experiment.dispatcher_bindings)',
+    )
+    experiment.add_argument('--execute', action='store_true',
+                            help='Execute offline; default validates the plan only')
+    experiment.add_argument('--confirm-simulated-output', action='store_true',
+                            help='Required for offline memory execution (no physical actuation)')
+    experiment.add_argument('--output-dir', help='Artifacts directory for results/CSV/JSONL')
+
+    analyze = sub.add_parser(
+        'analyze-regen-csv',
+        help='Offline energy analysis / trace export from an OXYGEN sync CSV (no hardware)',
+    )
+    analyze.add_argument('--csv', required=True, help='Sync acquisition CSV path')
+    analyze.add_argument('--simulated', action='store_true',
+                         help='Label metrics as simulated (required for non-acquisition fixtures)')
+    analyze.add_argument('--output-dir', default='logs/regen-analysis')
     return parser
 
 
@@ -189,6 +213,20 @@ def cmd_list_profiles(_args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_run_experiment(args: argparse.Namespace) -> int:
+    from .regen_experiment import run_experiment_cli
+
+    return run_experiment_cli(args)
+
+
+def cmd_analyze_regen_csv(args: argparse.Namespace) -> int:
+    from .analysis_viz import analyze_csv_cli
+
+    report = analyze_csv_cli(args.csv, simulated=args.simulated, output_dir=args.output_dir)
+    print(json.dumps(report, indent=2, allow_nan=False))
+    return 0
+
+
 def _normalize_argv(argv: list[str] | None) -> list[str]:
     """Allow global --live before or after the subcommand."""
     raw = list(sys.argv[1:] if argv is None else argv)
@@ -221,6 +259,8 @@ def main(argv: list[str] | None = None) -> int:
         'watch-do': cmd_watch_do,
         'scpi-smoke': cmd_scpi_smoke,
         'list-profiles': cmd_list_profiles,
+        'run-experiment': cmd_run_experiment,
+        'analyze-regen-csv': cmd_analyze_regen_csv,
     }
     try:
         return handlers[args.command](args)

@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "experiment_type": "regenerative_deceleration",
+  "name": "regen_bus_voltage_comparison",
+  "description": "Illustrative offline comparison of DC bus setpoints 36/38/40 V between trials only (not during the regen transient). Constant release duration and start-speed intent. Not commissioned for physical hardware.",
+  "simulation_only": true,
+  "physical_enabled": false,
+  "illustrative_only": true,
+  "dispatcher_bindings": "examples/memory-regen.json",
+  "commissioned_drive_limit_v": 0.40,
+  "higher_drive_limit_authorized": false,
+  "drive_limit_candidates": [
+    {"value_v": 0.40, "enabled": true, "commissioned": true},
+    {"value_v": 0.55, "enabled": false, "commissioned": false},
+    {"value_v": 0.70, "enabled": false, "commissioned": false},
+    {"value_v": 0.85, "enabled": false, "commissioned": false}
+  ],
+  "comparison": "bus_voltage",
+  "bus_setpoints_v": [36.0, 38.0, 40.0],
+  "speed_targets_erpm": [
+    {"target_erpm": 8000, "enabled": true, "commissioned": true, "max_speed_authorized": false}
+  ],
+  "release_durations_s": [0.50],
+  "drive_demand_v": 0.40,
+  "accel": {"ramp_s": 0.20, "hold_s": 0.20},
+  "settle_s": 0.10,
+  "recovery_observe_s": 0.50,
+  "inter_trial_recovery_s": 0.20,
+  "repetitions": 2,
+  "start_condition": {
+    "erpm_tolerance": 1500,
+    "bus_tolerance_v": 2.0,
+    "require_measured_erpm": false
+  },
+  "energy": {
+    "use_synthetic_when_no_csv": true
+  },
+  "rzxa_completion_policy": "preserve_demand",
+  "output_dir": "logs/regen-experiments"
+}
