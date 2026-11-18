@@ -1,0 +1,12 @@
+{
+  "schema_version": 3,
+  "name": "rzxa_voltage_up",
+  "description": "One adjacent +0.5 V nominal bus demand step (+0.00625 V AOUT), only on the commissioned 36..40 V grid. Not measured bus voltage or an emergency stop.",
+  "output": "rzxa_voltage_demand",
+  "timeout_s": 5,
+  "completion": {"mode": "hold_final", "value": "runtime_target", "operator_action_required_to_stop": true},
+  "requires": {"motor_neutral": true},
+  "steps": [
+    {"type": "relative_aout_step", "params": {"channel": "rzxa_voltage_demand", "direction": "up"}}
+  ]
+}

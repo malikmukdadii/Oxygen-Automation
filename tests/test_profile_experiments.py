@@ -8,7 +8,7 @@ import pytest
 from oxygen_engine.dispatcher import Dispatcher, MOTOR, SUPPLY, configuration_summary
 from oxygen_engine.errors import ControlError, InterlockError
 from oxygen_engine.memory_backend import MemoryBackend, SimulationFinished
-from oxygen_engine.schema import load_dispatcher_config
+from oxygen_engine.schema import SUPPLY_DEMAND_GRID, load_dispatcher_config
 
 ROOT = Path(__file__).resolve().parents[1]
 PROFILES = sorted(p for p in (ROOT / 'profiles').glob('*.json')
@@ -63,16 +63,33 @@ def test_v3_library_real_timeline_repeatable_in_memory(tmp_path, profile_path, i
     dispatcher.prepare()
     other = MOTOR if role == SUPPLY else SUPPLY
     other_before = dispatcher.states[other].value
+    relative = profile['steps'][0]['type'] == 'relative_aout_step'
+    if relative and initial not in SUPPLY_DEMAND_GRID:
+        with pytest.raises(InterlockError, match='grid starting point'):
+            dispatcher.execute_profile('experiment')
+        assert not backend.commands and dispatcher.completed == 0
+        assert dispatcher.states[other].value == other_before
+        backend.close()
+        return
     expected_checkpoints = [s['params']['name'] for s in profile['steps'] if s['type'] == 'checkpoint']
     for _ in range(2):
         before = len(records)
+        expected = profile['completion']['value']
+        if relative:
+            index = SUPPLY_DEMAND_GRID.index(dispatcher.states[role].value)
+            delta = 1 if profile['steps'][0]['params']['direction'] == 'up' else -1
+            expected = SUPPLY_DEMAND_GRID[max(0, min(8, index + delta))]
         dispatcher.execute_profile('experiment')
-        assert dispatcher.states[role].value == profile['completion']['value']
+        assert dispatcher.states[role].value == expected
         assert dispatcher.states[other].value == other_before
         assert [r['name'] for r in records[before:] if r['event'] == 'checkpoint'] == expected_checkpoints
-        assert clock.now > 0
+        if not relative:
+            assert clock.now > 0
     spec = raw['outputs'][role]
-    assert backend.commands
+    if relative and initial == .5 and delta == 1:
+        assert not backend.commands
+    else:
+        assert backend.commands
     assert all(r == role and spec['min_aout_v'] <= value <= spec['max_aout_v']
                for _, r, value in backend.commands)
     assert dispatcher.completed == 2

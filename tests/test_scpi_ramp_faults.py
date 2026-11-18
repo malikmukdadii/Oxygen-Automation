@@ -111,23 +111,56 @@ def prohibit_live_network(monkeypatch):
     monkeypatch.setattr('socket.create_connection', lambda *a, **k: pytest.fail('No real connection permitted'))
 
 
-def make_dispatcher(tmp_path, monkeypatch, mode, headers=False):
+def make_dispatcher(tmp_path, monkeypatch, mode, headers=False, relative=False):
     raw = json.loads((ROOT / 'examples/physical-dual.json').read_text())
     for role, name in NAMES.items():
         raw['outputs'][role]['channel'] = name
+    filename = 'rzxa_voltage_up.json' if relative else 'rzxa_36_38_40_ladder.json'
+    if relative:
+        raw['interlocks']['supply_demand_grid_commissioned'] = True
     raw['assignments'] = [{'name': 'ladder', 'enabled': True, 'trigger': 'RZXA Char', 'output': SUPPLY,
-                           'profile': str(ROOT / 'profiles/rzxa_36_38_40_ladder.json')}]
+                           'profile': str(ROOT / 'profiles' / filename)}]
     path = tmp_path / 'scripted.json'
     path.write_text(json.dumps(raw))
     config = load_dispatcher_config(path)
     clock, records = Clock(), []
     device = Device(clock, mode, headers)
+    if relative:
+        device.values[SUPPLY] = .4625
     backend = OxygenBackend(config, records.append, confirmed_outputs=list(NAMES.values()), live=True, clock=clock)
     monkeypatch.setattr(backend.transport, 'connect', lambda: device.connect(backend.transport))
     monkeypatch.setattr(backend.transport, '_readline', lambda: device.replies.pop(0))
     dispatcher = Dispatcher(config, backend, records.append, clock=clock, wait=clock.wait)
     monkeypatch.setattr(dispatcher, 'monitor', lambda: dispatcher.execute_profile('ladder'))
     return dispatcher, backend, device, records
+
+
+@pytest.mark.parametrize('headers', [False, True])
+@pytest.mark.parametrize('mode', ['queue_none', 'queue_rejected', 'none', 'inline_error', 'mismatch'])
+def test_relative_step_at_37_5_demand_retains_scpi_fault_evidence(tmp_path, monkeypatch, mode, headers):
+    dispatcher, _, device, records = make_dispatcher(tmp_path, monkeypatch, mode, headers, relative=True)
+    assert dispatcher.run() == 1
+    assert device.triggered and device.connect_count == 1
+    assert device.commands.count(device.failed_command) == 1
+    writes = [c for c in device.commands if c.startswith(':CHANNELlist:PROPerty ')]
+    supply_writes = [c for c in writes if f'"{IDS[SUPPLY]}"' in c]
+    assert supply_writes == [device.failed_command]
+    assert 'SCALAR,0.46875,"V"' in device.failed_command
+    assert dispatcher.completed == 0
+    state = next(r for r in records if r['event'] == 'profile_interrupted_state')['outputs'][SUPPLY]
+    assert state['last_confirmed_v'] == .4625
+    assert state['last_attempted_v'] == .46875
+    assert state['status'] == 'unknown'
+    if mode.startswith('queue_'):
+        transaction = next(r for r in records if r['event'] == 'scpi_command_failed')
+        assert transaction['error_code'] == -200
+        assert transaction['raw_error_reply'] == '-200,"Execution error"'
+        wire = next(r for r in records if r['event'] == 'aout_write_failed')
+        assert wire['scpi_command_id'] == transaction['scpi_command_id']
+    if mode == 'none':
+        read = next(r for r in records if r['event'] == 'output_readback_failed')
+        assert read['raw_readback'].endswith('NONE')
+    json.dumps(records, allow_nan=False)
 
 
 @pytest.mark.parametrize('headers', [False, True], ids=['header-off', 'header-on'])

@@ -18,7 +18,7 @@ from .do_monitor import DiagnosticEdgeTracker
 from .errors import ControlError, ControlNotReady, InterlockError
 from .memory_backend import MemoryBackend, SimulationFinished, load_scenario
 from .pattern_segments import OutputPattern, Segment, StrictRotatingHandler
-from .schema import number
+from .schema import SUPPLY_DEMAND_GRID, number
 
 SUPPLY = 'rzxa_voltage_demand'
 MOTOR = 'vesc_throttle'
@@ -273,10 +273,11 @@ class Dispatcher:
     def motor_interlocks(self, profile):
         interlocks = self.config.raw['interlocks']
         if self.has_supply and interlocks.get('require_supply_demand_before_motor', False):
-            self.verify(SUPPLY)
-            if not math.isclose(self.states[SUPPLY].value, interlocks['motor_supply_demand_v'],
-                                abs_tol=1e-6, rel_tol=0):
-                raise InterlockError('Supply demand readback is not the configured motor prerequisite')
+            actual = self.verify(SUPPLY)
+            demands = (interlocks['motor_supply_demands_v'] if 'motor_supply_demands_v' in interlocks
+                       else [interlocks['motor_supply_demand_v']])
+            if not any(math.isclose(actual, demand, abs_tol=1e-6, rel_tol=0) for demand in demands):
+                raise InterlockError('Supply demand readback is not a configured motor prerequisite; physical bus safety is not established')
         elif interlocks.get('require_supply_demand_before_motor'):
             raise InterlockError('require_supply_demand_before_motor needs an active supply role')
         if self.open_loop:
@@ -392,13 +393,26 @@ class Dispatcher:
     def execute_profile(self, name, *, trigger_observed=None):
         if not self.prepared or self.active_profile is not None:
             raise ControlError('Dispatcher is not prepared or another profile owns an output')
+        if self.interrupted_cycle or any(state.status == 'unknown' for state in self.states.values()):
+            raise ControlError('Interrupted operation or unknown output state; explicit restart and review required')
         if not self.open_loop:
             require_controller()
         profile = self.config.profiles[name]
         role = profile.output
+        relative = profile.steps[0]['type'] == 'relative_aout_step'
+        completion_target = profile.completion['value']
         try:
             self.verify(role)
             self.assert_preconditions(profile)
+            if relative:
+                current = self.states[role].last_readback_v
+                index = next((i for i, value in enumerate(SUPPLY_DEMAND_GRID)
+                              if math.isclose(current, value, abs_tol=1e-6, rel_tol=0)), None)
+                if index is None:
+                    raise InterlockError('Relative supply step requires a commissioned 36..40 V / 0.5 V demand grid starting point; no automatic entry')
+                direction = profile.steps[0]['params']['direction']
+                adjacent = index + (1 if direction == 'up' else -1)
+                completion_target = SUPPLY_DEMAND_GRID[max(0, min(adjacent, len(SUPPLY_DEMAND_GRID) - 1))]
         except Exception as exc:
             self.emit({'event': 'profile_precondition_failed', 'assignment': name, 'profile': profile.name,
                        'output': role, 'error_type': type(exc).__name__, 'error': str(exc),
@@ -409,7 +423,7 @@ class Dispatcher:
                        'age_s': self.clock() - trigger_observed,
                        'message': 'Precondition checks aged out the edge; no run. Apply a fresh LOW then HIGH.'})
             return
-        current = self.states[role].value
+        current = self.states[role].last_readback_v if relative else self.states[role].value
         self.active_profile, self.active_role = profile.name, role
         self.started += 1
         self.interrupted_cycle = True
@@ -420,7 +434,28 @@ class Dispatcher:
         try:
             requirements = [s.get('params', {}) for s in profile.steps if s['type'] == 'assert_preconditions']
             repeat_guard = any(p.get('current_aout_must_be_zero_or_already_target') for p in requirements)
-            if role == SUPPLY and repeat_guard and math.isclose(current, profile.completion['value'], abs_tol=1e-6, rel_tol=0):
+            if relative:
+                began = self.clock()
+                if adjacent < 0 or adjacent >= len(SUPPLY_DEMAND_GRID):
+                    self.emit({'event': 'relative_step_boundary_noop', 'profile': profile.name,
+                               'output': role, 'direction': direction, 'readback_v': current,
+                               'target_v': completion_target, 'hardware_write': False,
+                               'physical_voltage_established': False})
+                else:
+                    self.verify(role)
+                    self.motor_neutral()
+                    self.emit({'event': 'relative_step_target', 'profile': profile.name, 'output': role,
+                               'direction': direction, 'start_readback_v': current,
+                               'target_v': completion_target,
+                               'physical_voltage_established': False})
+                    self.command(role, completion_target)
+                self.motor_neutral()
+                if self.clock() - began > profile.timeout_s:
+                    raise TimeoutError('Relative supply step exceeded timeout including I/O')
+                result = {'actual_elapsed_s': self.clock() - began,
+                          'runtime_target_v': completion_target,
+                          'boundary_noop': adjacent < 0 or adjacent >= len(SUPPLY_DEMAND_GRID)}
+            elif role == SUPPLY and repeat_guard and math.isclose(current, profile.completion['value'], abs_tol=1e-6, rel_tol=0):
                 self.emit({'event': 'profile_noop_already_at_target', 'profile': profile.name, 'output': role})
                 result = {'actual_elapsed_s': 0.0, 'repeat_safe_noop': True}
             else:
@@ -465,7 +500,7 @@ class Dispatcher:
                                        clock=self.clock, wait=self.wait)
                 if self.clock() - began > profile.timeout_s:
                     raise TimeoutError('Profile exceeded timeout including I/O')
-            self.verify(role, profile.completion['value'])
+            self.verify(role, completion_target)
             self.states[role].held_by = profile.name if profile.completion['mode'] == 'hold_final' else None
             self.completed += 1
             self.interrupted_cycle = False

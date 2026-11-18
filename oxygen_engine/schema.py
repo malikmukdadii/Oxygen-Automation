@@ -19,6 +19,8 @@ MOTOR = 'vesc_throttle'
 ABSOLUTE_AOUT_MAX_V = 10.0
 MOTOR_EXAMPLE_MAX_V = 0.4  # simulated-motor default clamp (not a physical hardware raise)
 VERIFIED_GAIN = 80.0  # 1.000 V AOUT = 80 V bus (verified documentation)
+SUPPLY_DEMAND_GRID = tuple((36.0 + index * 0.5) / VERIFIED_GAIN for index in range(9))
+SUPPLY_DEMAND_STEP = 0.5 / VERIFIED_GAIN
 LIVE_FLAGS = {
     'enable_physical_aout', 'enable_rzxa_output_toggle', 'enable_real_rzxa_scpi',
     'require_explicit_hardware_authorization',
@@ -128,11 +130,23 @@ def load_profile(path, output, spec, *, open_loop: bool):
     completion = raw.get('completion', {'mode': spec['completion_policy'], 'value': spec.get('neutral_aout_v', 0)})
     keys(completion, {'mode', 'value', 'operator_action_required_to_stop'}, 'completion')
     mode = completion.get('mode')
+    steps = raw.get('steps')
+    relative = isinstance(steps, list) and any(
+        isinstance(step, dict) and step.get('type') == 'relative_aout_step' for step in steps)
     if spec['role'] == 'motor_throttle' and mode != 'return_neutral':
         raise ConfigError('Motor profiles must return to verified neutral')
     if spec['role'] == 'supply_voltage_demand' and mode not in {'hold_final', 'verify_zero'}:
         raise ConfigError('Supply completion must explicitly hold_final or verify_zero')
-    final = number(completion['value'], 'completion value', spec['min_aout_v'], spec['max_aout_v'])
+    if relative:
+        if (output != SUPPLY or not open_loop or mode != 'hold_final' or
+                completion.get('value') != 'runtime_target' or len(steps) != 1 or
+                raw.get('requires') != {'motor_neutral': True} or
+                spec['min_aout_v'] != 0.0 or spec['max_aout_v'] != 0.5 or
+                spec.get('mapping', {}).get('gain_bus_v_per_aout_v') != VERIFIED_GAIN):
+            raise ConfigError('Relative supply step requires open_loop, 0..0.5 V, gain 80, motor_neutral and runtime_target hold_final')
+        final = 'runtime_target'
+    else:
+        final = number(completion['value'], 'completion value', spec['min_aout_v'], spec['max_aout_v'])
     if mode in {'verify_zero', 'return_neutral'} and final != spec.get('neutral_aout_v', 0):
         raise ConfigError('Neutral/zero completion value must equal neutral')
     if mode == 'hold_final' and completion.get('operator_action_required_to_stop') is not True:
@@ -153,10 +167,15 @@ def load_profile(path, output, spec, *, open_loop: bool):
             'return_neutral': {'channel'},
             'checkpoint': {'name'},
             'assert_preconditions': allowed_pre,
+            'relative_aout_step': {'channel', 'direction'},
         }
         if kind not in allowed:
             raise ConfigError(f'Unsupported profile step: {kind}')
         keys(params, allowed[kind], kind)
+        if kind == 'relative_aout_step':
+            if params.get('channel') != SUPPLY or params.get('direction') not in ('up', 'down'):
+                raise ConfigError('Relative supply step needs supply channel and direction up/down')
+            continue
         if kind == 'assert_preconditions':
             if started or any(value is not True for value in params.values()):
                 raise ConfigError('Preconditions must be true requirements before output steps')
@@ -189,9 +208,9 @@ def load_profile(path, output, spec, *, open_loop: bool):
         else:
             if spec['role'] != 'motor_throttle' or target != spec['neutral_aout_v']:
                 raise ConfigError('return_neutral requires an explicit preceding motor ramp to neutral')
-    if not 1 <= timed <= 100 or elapsed > 300 or target != final:
+    if not relative and (not 1 <= timed <= 100 or elapsed > 300 or target != final):
         raise ConfigError('Need 1..100 timed steps, <=300 seconds, and final target matching completion')
-    timeout = number(raw.get('timeout_s', 300), 'timeout', elapsed, 600)
+    timeout = number(raw.get('timeout_s', 300), 'timeout', .1 if relative else elapsed, 600)
     requires = raw.get('requires', {})
     keys(requires, allowed_req, 'requires')
     constants = {
@@ -464,6 +483,7 @@ def load_dispatcher_config(path) -> DispatcherConfig:
     base = {'one_active_profile_global', 'external_emergency_stop_required_for_live'}
     cross = {
         'motor_supply_demand_v', 'supply_down_requires_motor_neutral', 'require_supply_demand_before_motor',
+        'motor_supply_demands_v', 'supply_demand_grid_commissioned',
     }
     feedback_keys = {
         'bus_target_v', 'bus_tolerance_v', 'max_feedback_age_s',
@@ -491,8 +511,28 @@ def load_dispatcher_config(path) -> DispatcherConfig:
                 '(true = verify motor neutral before supply motion)')
         if type(interlocks.get('require_supply_demand_before_motor')) is not bool:
             raise ConfigError('require_supply_demand_before_motor must be Boolean (default true in examples)')
-        demand = number(interlocks['motor_supply_demand_v'], 'motor supply prerequisite',
-                        0, outputs[SUPPLY]['max_aout_v'])
+        if 'motor_supply_demands_v' in interlocks:
+            demands = interlocks['motor_supply_demands_v']
+            if 'motor_supply_demand_v' in interlocks:
+                raise ConfigError('Choose scalar motor_supply_demand_v or discrete motor_supply_demands_v, not both')
+            if not isinstance(demands, list) or not demands or len(demands) > 9:
+                raise ConfigError('motor_supply_demands_v needs 1..9 commissioned discrete demands')
+            for value in demands:
+                number(value, 'commissioned supply demand', 0, outputs[SUPPLY]['max_aout_v'])
+                if value not in SUPPLY_DEMAND_GRID:
+                    raise ConfigError('Motor supply demand is outside the commissioned 36..40 V / 0.5 V grid')
+            if len(set(demands)) != len(demands):
+                raise ConfigError('Duplicate commissioned supply demands')
+            if not open_loop:
+                raise ConfigError('Discrete supply demands currently require open_loop; measured bus protection is independent')
+            if physical and interlocks.get('supply_demand_grid_commissioned') is not True:
+                raise ConfigError('Physical discrete demands require supply_demand_grid_commissioned true after separate review')
+        else:
+            demand = number(interlocks['motor_supply_demand_v'], 'motor supply prerequisite',
+                            0, outputs[SUPPLY]['max_aout_v'])
+        if ('supply_demand_grid_commissioned' in interlocks and
+                type(interlocks['supply_demand_grid_commissioned']) is not bool):
+            raise ConfigError('supply_demand_grid_commissioned must be Boolean')
     elif MOTOR in active:
         if interlocks.get('require_supply_demand_before_motor', False) is not False:
             raise ConfigError('Motor-only configs must set require_supply_demand_before_motor false')
@@ -562,8 +602,8 @@ def load_dispatcher_config(path) -> DispatcherConfig:
         raw['simulation'] = {}
 
     assignments = raw.get('assignments')
-    if not isinstance(assignments, list) or not 1 <= len(assignments) <= 6:
-        raise ConfigError('Provide 1..6 assignments')
+    if not isinstance(assignments, list) or not 1 <= len(assignments) <= 8:
+        raise ConfigError('Provide 1..8 assignments')
     profiles, triggers = {}, set()
     sensor_names = {m.get('channel') for m in measurements.values() if isinstance(m, dict) and m.get('channel')}
     output_names = {s.get('channel') for s in outputs.values() if s.get('channel')}
@@ -582,6 +622,9 @@ def load_dispatcher_config(path) -> DispatcherConfig:
             raise ConfigError('Unknown output role')
         filename = exact_name(assignment.get('profile'), 'profile path')
         profile = load_profile(path.parent / filename, output, outputs[output], open_loop=open_loop)
+        if any(step['type'] == 'relative_aout_step' for step in profile.steps):
+            if physical and interlocks.get('supply_demand_grid_commissioned') is not True:
+                raise ConfigError('Physical relative steps require supply_demand_grid_commissioned true after separate review')
         if MOTOR not in outputs:
             if profile.requires.get('motor_neutral'):
                 raise ConfigError(f'{name}: motor_neutral prerequisite needs an active vesc_throttle role')

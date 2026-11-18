@@ -99,8 +99,10 @@ zero drive demand does not by itself prove passive freewheeling or absence of br
   deliberately and record the chosen file in the run notes. Do not silently rename its DOUT.
   The startup summary shows the actual selected file so the button label need not be mistaken
   for the experiment identity. Restart after config changes.
-- At most six assignments are supported. Select an existing slot for alternative experiments;
-  do not introduce another runtime configuration or a parallel controller.
+- Up to eight assignments are supported. The existing six-button configurations remain valid.
+  See [CES manual demand stepping](ces-rzxa-voltage-stepping.md) for the separate memory-only
+  eight-button example, strict relative-demand grid, and additional commissioning requirements.
+  Do not introduce a parallel controller or assume chassis DOUT identities.
 
 ## Operator diagnostics and polling limits
 

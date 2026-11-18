@@ -21,6 +21,7 @@ Illustrative variants live under `examples/` and must not be confused with the a
 | `dispatcher.json` | Active operator config (local only) |
 | `dispatcher.example.json` | Committed starter (memory dual-output) |
 | `examples/memory-dual.json` | Offline dual-output fixture |
+| `examples/ces-eight-button.json` | Offline eight-button CES example; relative RZ-XA demand stepping |
 | `examples/supply-only.json` | Supply-only RZ-XA commissioning |
 | `examples/oxygen-demo.json` | Simulated OXYGEN demo |
 | `examples/physical-dual.json` | Physical dual-output template |
@@ -73,6 +74,8 @@ python -m venv .venv-scpi
 | `profiles/rzxa_ramp_hold.json` | Supply ramp + hold at 0.5 V |
 | `profiles/rzxa_ramp_down.json` | Supply ramp to 0 V |
 | `profiles/rzxa_steps.json` | Supply 0.45/0.50 characterization |
+| `profiles/rzxa_voltage_down.json` | One adjacent -0.00625 V AOUT demand step on the 36..40 V nominal grid |
+| `profiles/rzxa_voltage_up.json` | One adjacent +0.00625 V AOUT demand step on the 36..40 V nominal grid |
 | `profiles/motor_gentle.json` | Gentle motor pulse |
 | `profiles/motor_stop_go.json` | Stop/go pulses |
 | `profiles/motor_cruise.json` | Multi-level cruise |
@@ -84,6 +87,12 @@ See [open-loop experiments](docs/open-loop-experiments.md) for durations, sugges
 assignments, measurement interpretation and the inspected local enable flags. Disabled assignments
 are not polled. Startup diagnostics list both enabled and disabled entries, exact AOUT mappings and
 voltage limits. Active profiles pause DOUT polling; busy pulses can be unobservable and are not queued.
+
+See [CES manual demand stepping](docs/ces-rzxa-voltage-stepping.md) for the eight-button example,
+discrete motor supply prerequisites, unchanged polling limits, additional physical commissioning
+gate, and read-only / isolated low-energy acceptance procedures. Relative steps reject off-grid
+starts; unlike supply ramps, they cannot enter the grid from zero. Demand readback is not
+measured bus voltage, stopped motion, source/sink readiness or regenerative safety.
 
 ## Coordinated DC-to-AC experiments
 
