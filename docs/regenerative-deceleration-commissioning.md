@@ -66,9 +66,42 @@ Comparisons: release duration, initial speed, bus voltage (36/38/40 V between tr
 ## Energy analysis
 
 Authoritative electrical energy comes from OXYGEN **sync acquisition CSV**, trapezoidal
-integration of \(P_{DC}(t)\). Sign convention: positive = RZ-XA supplying VESC; negative =
-toward RZ-XA. Report **electrical energy-return ratio** (not mechanical efficiency). Offline
-synthetic series are always labeled **simulated**.
+integration of \(P_{DC}(t)\) with zero-crossing split (energy and regen duration share the same
+subinterval math). Sign convention: positive = RZ-XA supplying VESC; negative = toward RZ-XA.
+Report **electrical energy-return ratio** (not mechanical efficiency). Offline synthetic series
+are always labeled **simulated**.
+
+### Clock domains (do not conflate)
+
+| Domain | Use |
+|---|---|
+| `host_monotonic` | Control deadlines / `execute_timeline` ramp scheduling |
+| `host_wall_utc` | JSONL log timestamps |
+| `acquisition` | OXYGEN sync CSV `time_s` |
+
+JSONL `trial_marker` events are **host_monotonic log markers only** — they are not OXYGEN
+acquisition markers and must not be used as CSV time windows.
+
+### CSV↔trial association modes
+
+| Mode | Meaning |
+|---|---|
+| `A_markers` | Bind by acquisition marker column texts |
+| `B_acquisition_windows` | Explicit `start_s`/`end_s` in acquisition time |
+| `C_verified_affine` | Map host_monotonic→acquisition only when `affine.verified=true` |
+
+Never apply the whole sync CSV to every trial. Never treat host_monotonic as acquisition time
+unless Mode C is explicitly verified.
+
+Example:
+
+```powershell
+.\.venv-scpi\Scripts\python.exe -m oxygen_engine analyze-regen-csv `
+  --csv path\to\sync.csv `
+  --map time_s=Time --map dc_power_w=PowerDC --map erpm=ERPM `
+  --trial-id t1 --marker-start REGEN_D_START_t1 --marker-end REGEN_E_END_t1 `
+  --output-dir logs/regen-analysis
+```
 
 ## Feedback pinning
 

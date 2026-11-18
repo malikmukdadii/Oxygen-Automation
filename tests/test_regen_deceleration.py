@@ -17,6 +17,7 @@ from oxygen_engine.energy_analysis import (
     compute_metrics,
     extract_trial_series,
     load_sync_csv,
+    regen_duration_s,
     synthetic_regen_series,
     trapezoidal_energy,
 )
@@ -221,6 +222,21 @@ def test_trapezoidal_zero_crossing_split_analytical():
     assert e_in == pytest.approx(2.5)
     assert e_return == pytest.approx(2.5)
     assert e_net == pytest.approx(0.0)
+
+
+def test_regen_duration_matches_zero_crossing_split():
+    """regen_duration must use the same split as energy — not the whole sample if either end is negative."""
+    from oxygen_engine.energy_analysis import SyncSeries
+
+    assert regen_duration_s([0.0, 1.0], [10.0, -10.0]) == pytest.approx(0.5)
+    assert regen_duration_s([0.0, 1.0], [-5.0, -5.0]) == pytest.approx(1.0)
+    assert regen_duration_s([0.0, 1.0], [5.0, 5.0]) == pytest.approx(0.0)
+    assert regen_duration_s([0.0, 1.0], [10.0, 0.0]) == pytest.approx(0.0)
+    assert regen_duration_s([0.0, 1.0], [0.0, -10.0]) == pytest.approx(1.0)
+    metrics = compute_metrics(SyncSeries(time_s=[0.0, 1.0], dc_power_w=[10.0, -10.0], simulated=True))
+    assert metrics.regen_duration_s == pytest.approx(0.5)
+    assert metrics.e_in_j == pytest.approx(2.5)
+    assert metrics.e_return_j == pytest.approx(2.5)
 
 
 def test_trapezoidal_integration_and_csv_import(tmp_path):
@@ -479,8 +495,100 @@ def test_ramp_records_absolute_deadlines_and_cmd_ack():
     runner._ramp(MOTOR, 0.4, 0.1, 'B_controlled_accel')
     setpoints = [r for r in records if r.get('event') == 'experiment_setpoint' and r.get('precise_ramp')]
     assert setpoints
-    assert all('cmd_monotonic_s' in r and 'ack_monotonic_s' in r and 'deadline_monotonic_s' in r
-               for r in setpoints)
+    assert all(r.get('scheduler') == 'execute_timeline' for r in setpoints)
+    assert all('cmd_monotonic_s' in r and 'ack_monotonic_s' in r for r in setpoints)
+    assert all(r.get('clock_domain') == 'host_monotonic' for r in setpoints)
+    assert any(r.get('event') == 'experiment_ramp_complete' for r in records)
+
+
+@pytest.mark.parametrize('latency_s', [0.0, 0.05, 0.10, 0.20])
+def test_ramp_tolerates_scpi_latency_within_limit(latency_s):
+    experiment = load_experiment_config(EXPERIMENT_RELEASE)
+    config = load_dispatcher_config(MEMORY_REGEN)
+    assert config.raw['timing']['max_lateness_ms'] >= 250
+    _, emit = _emit_collect()
+    clock = Clock()
+    backend = MemoryBackend(config, clock=clock)
+    dispatcher = Dispatcher(config, backend, emit, clock=clock, wait=clock.wait)
+    backend.connect()
+    dispatcher.prepare()
+    dispatcher.command(SUPPLY, 0.5)
+    original = dispatcher.command
+
+    def slow_command(role, value):
+        if latency_s:
+            clock.wait(latency_s)
+        return original(role, value)
+
+    dispatcher.command = slow_command
+    runner = RegenExperimentRunner(experiment, dispatcher, emit)
+    runner._ramp(MOTOR, 0.4, 0.2, 'B_controlled_accel')
+    assert dispatcher.states[MOTOR].value == pytest.approx(0.4)
+
+
+def test_ramp_faults_when_latency_exceeds_max_lateness():
+    experiment = load_experiment_config(EXPERIMENT_RELEASE)
+    config = load_dispatcher_config(MEMORY_REGEN)
+    _, emit = _emit_collect()
+    clock = Clock()
+    backend = MemoryBackend(config, clock=clock)
+    dispatcher = Dispatcher(config, backend, emit, clock=clock, wait=clock.wait)
+    backend.connect()
+    dispatcher.prepare()
+    dispatcher.command(SUPPLY, 0.5)
+    original = dispatcher.command
+    # Over tolerance vs max_lateness_ms=250.
+    over = config.raw['timing']['max_lateness_ms'] / 1000.0 + 0.05
+
+    def slow_command(role, value):
+        clock.wait(over)
+        return original(role, value)
+
+    dispatcher.command = slow_command
+    runner = RegenExperimentRunner(experiment, dispatcher, emit)
+    with pytest.raises(TimeoutError, match='lateness'):
+        runner._ramp(MOTOR, 0.4, 0.2, 'B_controlled_accel')
+
+
+def test_host_monotonic_markers_are_not_acquisition_windows():
+    experiment = load_experiment_config(EXPERIMENT_RELEASE)
+    config = load_dispatcher_config(MEMORY_REGEN)
+    records, emit = _emit_collect()
+    clock = Clock()
+    backend = MemoryBackend(config, clock=clock)
+    dispatcher = Dispatcher(config, backend, emit, clock=clock, wait=clock.wait)
+    backend.connect()
+    dispatcher.prepare()
+    summary = RegenExperimentRunner(experiment, dispatcher, emit).run()
+    markers = [r for r in records if r.get('event') == 'trial_marker']
+    assert markers
+    assert all(r.get('clock_domain') == 'host_monotonic' for r in markers)
+    assert all(r.get('oxygen_acquisition_marker') is False for r in markers)
+    # Synthetic path: no acquisition CSV windows filled from monotonic clock.
+    valid = [t for t in summary['trials'] if t['valid']]
+    assert valid
+    assert all(t.get('csv_window_start_s') is None and t.get('csv_window_end_s') is None for t in valid)
+
+
+def test_mode_b_refuses_monotonic_as_acquisition(tmp_path):
+    experiment = load_experiment_config(EXPERIMENT_RELEASE)
+    experiment['feedback_mode'] = 'measured'
+    experiment['simulation_only'] = False
+    experiment['energy'] = {
+        **experiment['energy'],
+        'csv_path': str(tmp_path / 'sync.csv'),
+        'use_synthetic_when_no_csv': False,
+        'association_mode': 'B_acquisition_windows',
+        'trial_windows': {},
+    }
+    config = load_dispatcher_config(MEMORY_REGEN)
+    _, emit = _emit_collect()
+    clock = Clock()
+    backend = MemoryBackend(config, clock=clock)
+    dispatcher = Dispatcher(config, backend, emit, clock=clock, wait=clock.wait)
+    runner = RegenExperimentRunner(experiment, dispatcher, emit)
+    with pytest.raises(ConfigError, match='Mode B requires acquisition'):
+        runner._resolve_csv_binding('missing', {'start_s': 1.0, 'end_s': 2.0, 'timebase': 'host_monotonic'})
 
 
 def test_measured_feedback_forbids_demand_proxy():

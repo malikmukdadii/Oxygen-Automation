@@ -10,7 +10,8 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .dispatcher import MOTOR, SUPPLY, Dispatcher
+from .constant_pattern import execute_timeline
+from .dispatcher import MOTOR, SUPPLY, Dispatcher, HeldPattern
 from .drive_limits import (
     DEFAULT_COMMISSIONED_DRIVE_LIMIT_V,
     PLANNING_CANDIDATES_V,
@@ -26,8 +27,19 @@ from .energy_analysis import (
 )
 from .errors import AuthorizationError, ConfigError, ControlError, InterlockError
 from .memory_backend import MemoryBackend
-from .pattern_segments import StrictRotatingHandler
+from .pattern_segments import Segment, StrictRotatingHandler
 from .schema import ABSOLUTE_AOUT_MAX_V, load_dispatcher_config, number, read_json
+
+# Explicit clock domains for regen experiments (never conflate these):
+# - host_monotonic: control deadlines / execute_timeline (dispatcher.clock)
+# - host_wall_utc: JSONL log timestamps
+# - acquisition: OXYGEN sync CSV time_s
+CLOCK_DOMAINS = ('host_monotonic', 'host_wall_utc', 'acquisition')
+# CSV↔trial association modes:
+# A = acquisition markers in sync CSV
+# B = explicit acquisition-time windows
+# C = verified affine map host_monotonic → acquisition (only when verified=true)
+ASSOCIATION_MODES = ('A_markers', 'B_acquisition_windows', 'C_verified_affine')
 
 
 LOCKED_AOUT_NAMES = {
@@ -193,18 +205,40 @@ def load_experiment_config(path) -> dict:
     energy = raw.get('energy', {})
     _keys(energy, {
         'channel_map', 'use_synthetic_when_no_csv', 'csv_path', 'trial_windows',
-        'polarity', 'time_unit', 'marker_column',
+        'polarity', 'time_unit', 'marker_column', 'association_mode', 'affine',
     }, 'energy')
     trial_windows = energy.get('trial_windows') or {}
     if trial_windows and not isinstance(trial_windows, dict):
         raise ConfigError('energy.trial_windows must be an object keyed by trial_id')
     for key, window in trial_windows.items():
-        _keys(window, {'start_s', 'end_s', 'marker_start', 'marker_end'}, f'trial_windows[{key}]')
+        _keys(window, {
+            'start_s', 'end_s', 'marker_start', 'marker_end', 'timebase',
+        }, f'trial_windows[{key}]')
+        if window.get('timebase', 'acquisition') != 'acquisition':
+            raise ConfigError(
+                f'trial_windows[{key}]: timebase must be acquisition '
+                '(host_monotonic windows are not acquisition times)')
         if 'start_s' in window or 'end_s' in window:
             number(window['start_s'], 'window start', -1e9, 1e9)
             number(window['end_s'], 'window end', -1e9, 1e9)
             if window['end_s'] <= window['start_s']:
                 raise ConfigError(f'trial_windows[{key}]: end_s must exceed start_s')
+    association_mode = energy.get('association_mode')
+    if association_mode is not None and association_mode not in ASSOCIATION_MODES:
+        raise ConfigError(f'association_mode must be one of {ASSOCIATION_MODES}')
+    affine = energy.get('affine')
+    if affine is not None:
+        _keys(affine, {'slope', 'offset_s', 'verified'}, 'energy.affine')
+        number(affine.get('slope'), 'affine.slope', 1e-9, 1e9)
+        number(affine.get('offset_s'), 'affine.offset_s', -1e9, 1e9)
+        if type(affine.get('verified')) is not bool:
+            raise ConfigError('energy.affine.verified must be Boolean')
+        if association_mode == 'C_verified_affine' and affine.get('verified') is not True:
+            raise ConfigError('Mode C requires energy.affine.verified=true')
+    if energy.get('csv_path') and association_mode is None:
+        raise ConfigError(
+            'csv_path requires association_mode '
+            '(A_markers | B_acquisition_windows | C_verified_affine)')
     raw['energy'] = {
         'channel_map': energy.get('channel_map') or {},
         'use_synthetic_when_no_csv': bool(energy.get('use_synthetic_when_no_csv', True)),
@@ -213,6 +247,8 @@ def load_experiment_config(path) -> dict:
         'polarity': energy.get('polarity', 'rzxa_supply_positive'),
         'time_unit': energy.get('time_unit', 's'),
         'marker_column': energy.get('marker_column', 'marker'),
+        'association_mode': association_mode,
+        'affine': affine,
     }
     if raw['energy']['csv_path'] is not None and not isinstance(raw['energy']['csv_path'], str):
         raise ConfigError('energy.csv_path must be a string path when provided')
@@ -343,9 +379,10 @@ class RegenExperimentRunner:
         return max(self.dispatcher.config.raw['timing']['interval_ms'] / 1000.0, 0.02)
 
     def _ramp(self, role: str, target: float, duration_s: float, phase: str):
-        """Absolute-deadline ramp scheduler; records cmd/ack timestamps; rejects undersized ramps."""
+        """Absolute-deadline ramp via V3 execute_timeline (wait-then-command; no burst replay)."""
         current = self.dispatcher.verify(role)
         resolution = self._control_resolution_s()
+        max_lateness_s = self.dispatcher.config.raw['timing']['max_lateness_ms'] / 1000.0
         if duration_s < 0:
             raise ConfigError(f'Ramp duration must be >= 0 (phase={phase})')
         if math.isclose(current, target, abs_tol=1e-9):
@@ -356,6 +393,7 @@ class RegenExperimentRunner:
                 'event': 'experiment_setpoint', 'phase': phase, 'output': role,
                 'nominal_v': target, 'acknowledged_v': target,
                 'cmd_monotonic_s': cmd_at, 'ack_monotonic_s': ack_at,
+                'clock_domain': 'host_monotonic',
                 'precise_ramp': False, 'note': 'already at target; single verify/write only',
             })
             return
@@ -367,6 +405,7 @@ class RegenExperimentRunner:
                 'event': 'experiment_setpoint', 'phase': phase, 'output': role,
                 'nominal_v': target, 'acknowledged_v': self.dispatcher.states[role].value,
                 'cmd_monotonic_s': cmd_at, 'ack_monotonic_s': ack_at,
+                'clock_domain': 'host_monotonic',
                 'precise_ramp': False,
                 'note': 'duration_s=0 is a single write, not a precise ramp',
             })
@@ -375,29 +414,59 @@ class RegenExperimentRunner:
             raise ConfigError(
                 f'Ramp duration {duration_s} s is below control resolution {resolution} s '
                 f'(phase={phase}); refuse invalid timing rather than invent a precise ramp')
-        steps = max(2, int(math.ceil(duration_s / resolution)))
+
+        # Prefer the shared V3 timeline: absolute monotonic deadlines, wait before command,
+        # lateness fault, no overdue burst replay.
+        pattern = HeldPattern(
+            f'regen_{phase}',
+            (Segment(0.0, duration_s, current, target, phase),),
+        )
         started = self.dispatcher.clock()
-        for index in range(1, steps + 1):
+
+        def guard(value):
             if self.faulted:
                 raise ControlError('Experiment faulted; no auto-resume')
-            frac = index / steps
-            value = current + (target - current) * frac
-            deadline = started + duration_s * frac
-            cmd_at = self.dispatcher.clock()
+            now = self.dispatcher.clock()
+            # Never command before the absolute deadline for this elapsed setpoint.
+            # execute_timeline already waits; this guard records cmd/ack on host_monotonic.
+            cmd_at = now
             self.dispatcher.command(role, value)
             ack_at = self.dispatcher.clock()
             self.emit({
                 'event': 'experiment_setpoint', 'phase': phase, 'output': role,
                 'nominal_v': value, 'acknowledged_v': self.dispatcher.states[role].value,
                 'cmd_monotonic_s': cmd_at, 'ack_monotonic_s': ack_at,
-                'deadline_monotonic_s': deadline,
+                'deadline_monotonic_s': started + pattern.duration_s,  # end bound; slots via timeline
                 'scpi_latency_s': ack_at - cmd_at,
+                'clock_domain': 'host_monotonic',
                 'precise_ramp': True,
-                'note': 'absolute-deadline scheduler; nominal vs acknowledged distinguished',
+                'scheduler': 'execute_timeline',
+                'note': 'wait-then-command absolute deadlines; no burst replay of overdue slots',
             })
-            now = self.dispatcher.clock()
-            if deadline > now:
-                self.dispatcher.wait(deadline - now)
+
+        def verify(value):
+            self.dispatcher.verify(role, value)
+
+        def progress(record):
+            self.emit({
+                **record,
+                'phase': phase,
+                'output': role,
+                'clock_domain': 'host_monotonic',
+                'scheduler': 'execute_timeline',
+            })
+
+        result = execute_timeline(
+            pattern, guard, verify, progress,
+            interval_s=resolution,
+            max_lateness_s=max_lateness_s,
+            clock=self.dispatcher.clock,
+            wait=self.dispatcher.wait,
+        )
+        self.emit({
+            'event': 'experiment_ramp_complete', 'phase': phase, 'output': role,
+            'clock_domain': 'host_monotonic', **result,
+        })
 
     def read_erpm(self) -> float | None:
         self.pin_feedback_identities()
@@ -501,8 +570,54 @@ class RegenExperimentRunner:
             'software_neutral_is_not_estop': True,
         })
 
+    def _resolve_csv_binding(self, trial_id: str, host_log_window: dict | None) -> dict:
+        """Map a trial to acquisition-domain CSV bounds. Never treat host_monotonic as acquisition."""
+        energy_cfg = self.experiment['energy']
+        mode = energy_cfg.get('association_mode')
+        configured = (energy_cfg.get('trial_windows') or {}).get(trial_id)
+        if mode == 'A_markers':
+            binding = configured or {}
+            if not (binding.get('marker_start') and binding.get('marker_end')):
+                raise ConfigError(
+                    f'Mode A requires acquisition marker_start/marker_end for trial_id={trial_id}')
+            return {
+                'marker_start': binding['marker_start'],
+                'marker_end': binding['marker_end'],
+                'timebase': 'acquisition',
+                'association_mode': mode,
+            }
+        if mode == 'B_acquisition_windows':
+            binding = configured or {}
+            if binding.get('start_s') is None or binding.get('end_s') is None:
+                raise ConfigError(
+                    f'Mode B requires acquisition start_s/end_s for trial_id={trial_id}')
+            if binding.get('timebase', 'acquisition') != 'acquisition':
+                raise ConfigError('Mode B windows must use acquisition timebase')
+            return {
+                'start_s': binding['start_s'],
+                'end_s': binding['end_s'],
+                'timebase': 'acquisition',
+                'association_mode': mode,
+            }
+        if mode == 'C_verified_affine':
+            affine = energy_cfg.get('affine') or {}
+            if affine.get('verified') is not True:
+                raise ConfigError('Mode C refused: affine mapping is not verified')
+            if not host_log_window or host_log_window.get('start_s') is None:
+                raise ConfigError('Mode C requires host_monotonic log markers to transform')
+            slope = float(affine['slope'])
+            offset = float(affine['offset_s'])
+            return {
+                'start_s': slope * host_log_window['start_s'] + offset,
+                'end_s': slope * host_log_window['end_s'] + offset,
+                'timebase': 'acquisition',
+                'association_mode': mode,
+                'affine_verified': True,
+            }
+        raise ConfigError(f'Unsupported or missing association_mode for csv_path: {mode!r}')
+
     def analyze_trial(self, plan: dict, drive_v: float, trial_id: str,
-                      window: dict | None) -> EnergyMetrics:
+                      host_log_window: dict | None) -> EnergyMetrics:
         from .energy_analysis import extract_trial_series, load_sync_csv
 
         energy_cfg = self.experiment['energy']
@@ -517,15 +632,11 @@ class RegenExperimentRunner:
                 time_unit=energy_cfg.get('time_unit', 's'),
                 marker_column=energy_cfg.get('marker_column', 'marker'),
             )
-            binding = (energy_cfg.get('trial_windows') or {}).get(trial_id) or window
-            if not binding:
-                raise ConfigError(
-                    f'No trial window/markers for trial_id={trial_id}; '
-                    'refusing to apply whole sync CSV to every trial')
+            binding = self._resolve_csv_binding(trial_id, host_log_window)
             series = extract_trial_series(
                 full,
                 trial_id=trial_id,
-                window=((binding.get('start_s'), binding.get('end_s'))
+                window=((binding['start_s'], binding['end_s'])
                         if binding.get('start_s') is not None else None),
                 marker_start=binding.get('marker_start'),
                 marker_end=binding.get('marker_end'),
@@ -600,22 +711,32 @@ class RegenExperimentRunner:
                     simulated=self.feedback_mode == 'simulated', events=events,
                     feedback_mode=self.feedback_mode,
                 )
-            window_start = self.dispatcher.clock()
-            self.emit({'event': 'trial_marker', 'marker': marker_start, 'trial_id': trial_id,
-                       'monotonic_s': window_start})
+            # Host-monotonic log markers only — NOT OXYGEN acquisition markers / CSV time_s.
+            host_start = self.dispatcher.clock()
+            self.emit({
+                'event': 'trial_marker', 'marker': marker_start, 'trial_id': trial_id,
+                'monotonic_s': host_start, 'clock_domain': 'host_monotonic',
+                'oxygen_acquisition_marker': False,
+                'note': 'JSONL/host log marker only; not an OXYGEN sync acquisition marker',
+            })
             self.phase_d_regen_decel(plan['release_duration_s'])
             self.phase_e_recovery_observe()
-            window_end = self.dispatcher.clock()
-            self.emit({'event': 'trial_marker', 'marker': marker_end, 'trial_id': trial_id,
-                       'monotonic_s': window_end})
+            host_end = self.dispatcher.clock()
+            self.emit({
+                'event': 'trial_marker', 'marker': marker_end, 'trial_id': trial_id,
+                'monotonic_s': host_end, 'clock_domain': 'host_monotonic',
+                'oxygen_acquisition_marker': False,
+                'note': 'JSONL/host log marker only; not an OXYGEN sync acquisition marker',
+            })
             self.phase_f_complete()
-            window = {
-                'start_s': window_start,
-                'end_s': window_end,
+            host_log_window = {
+                'start_s': host_start,
+                'end_s': host_end,
                 'marker_start': marker_start,
                 'marker_end': marker_end,
+                'timebase': 'host_monotonic',
             }
-            metrics = self.analyze_trial(plan, drive_v, trial_id, window)
+            metrics = self.analyze_trial(plan, drive_v, trial_id, host_log_window)
             self.dispatcher.wait(self.experiment['inter_trial_recovery_s'])
             return TrialResult(
                 trial_id=trial_id, comparison_axis=plan['comparison_axis'],
@@ -624,7 +745,9 @@ class RegenExperimentRunner:
                 target_erpm=plan.get('target_erpm'), valid=True, invalid_reason=None,
                 phase='complete', metrics=metrics.as_dict(),
                 simulated=metrics.simulated, events=events,
-                csv_window_start_s=window_start, csv_window_end_s=window_end,
+                # Preserve host-monotonic log span for Mode C; never imply acquisition time.
+                csv_window_start_s=None,
+                csv_window_end_s=None,
                 marker_start=marker_start, marker_end=marker_end,
                 feedback_mode=self.feedback_mode,
             )

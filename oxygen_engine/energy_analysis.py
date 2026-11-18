@@ -102,6 +102,28 @@ def validate_series(series: SyncSeries) -> None:
         raise ConfigError('Need dc_power_w or both dc_voltage_v and dc_current_a')
 
 
+def signed_power_interval(p0: float, p1: float, dt: float) -> tuple[float, float, float, float]:
+    """Split one linear power sample into (+dt, −dt, E_in, E_return) with zero-crossing split.
+
+    Returns (dt_positive, dt_negative, e_in_j, e_return_j).
+    """
+    if dt <= 0 or (p0 == 0 and p1 == 0):
+        return 0.0, 0.0, 0.0, 0.0
+    # Same-sign (including touching zero on one end): one trapezoid.
+    if p0 * p1 > 0 or p0 == 0 or p1 == 0:
+        energy = 0.5 * (p0 + p1) * dt
+        if p0 > 0 or p1 > 0:
+            return dt, 0.0, max(energy, 0.0), max(-energy, 0.0)
+        return 0.0, dt, max(energy, 0.0), max(-energy, 0.0)
+    # Zero-crossing inside the sample.
+    frac = abs(p0) / (abs(p0) + abs(p1))
+    if p0 > 0:
+        dt_pos, dt_neg = dt * frac, dt * (1.0 - frac)
+        return dt_pos, dt_neg, 0.5 * p0 * dt_pos, 0.5 * abs(p1) * dt_neg
+    dt_neg, dt_pos = dt * frac, dt * (1.0 - frac)
+    return dt_pos, dt_neg, 0.5 * p1 * dt_pos, 0.5 * abs(p0) * dt_neg
+
+
 def trapezoidal_energy(time_s: list[float], power_w: list[float]) -> tuple[float, float, float]:
     """Positive P_DC = RZ-XA supplying VESC; negative = toward RZ-XA.
 
@@ -112,31 +134,21 @@ def trapezoidal_energy(time_s: list[float], power_w: list[float]) -> tuple[float
     e_return = 0.0
     for index in range(1, len(time_s)):
         dt = time_s[index] - time_s[index - 1]
-        if dt <= 0:
-            continue
-        p0 = power_w[index - 1]
-        p1 = power_w[index]
-        if p0 == 0 and p1 == 0:
-            continue
-        # Same-sign (including touching zero on one end): one trapezoid.
-        if p0 * p1 > 0 or p0 == 0 or p1 == 0:
-            energy = 0.5 * (p0 + p1) * dt
-            if energy >= 0:
-                e_in += energy
-            else:
-                e_return += -energy
-            continue
-        # Zero-crossing inside the sample: split into positive and negative subintervals.
-        frac = abs(p0) / (abs(p0) + abs(p1))
-        dt_pos = dt * frac if p0 > 0 else dt * (1.0 - frac)
-        dt_neg = dt - dt_pos
-        if p0 > 0:
-            e_in += 0.5 * p0 * dt_pos
-            e_return += 0.5 * abs(p1) * dt_neg
-        else:
-            e_return += 0.5 * abs(p0) * dt_neg
-            e_in += 0.5 * p1 * dt_pos
+        _, _, segment_in, segment_return = signed_power_interval(
+            power_w[index - 1], power_w[index], dt)
+        e_in += segment_in
+        e_return += segment_return
     return e_in, e_return, e_in - e_return
+
+
+def regen_duration_s(time_s: list[float], power_w: list[float]) -> float:
+    """Duration of negative-power subintervals using the same zero-crossing split as energy."""
+    duration = 0.0
+    for index in range(1, len(time_s)):
+        dt = time_s[index] - time_s[index - 1]
+        _, dt_neg, _, _ = signed_power_interval(power_w[index - 1], power_w[index], dt)
+        duration += dt_neg
+    return duration
 
 
 def compute_metrics(
@@ -167,10 +179,7 @@ def compute_metrics(
     ratio = (e_return / e_in) if e_in > 0 else None
     peak_neg_power = min(0.0, min(powers))
     peak_neg_current = min(0.0, min(currents)) if currents else 0.0
-    regen_duration = 0.0
-    for index in range(1, len(powers)):
-        if powers[index] < 0 or powers[index - 1] < 0:
-            regen_duration += times[index] - times[index - 1]
+    regen_duration = regen_duration_s(times, powers)
 
     start_erpm = erpms[0] if erpms else None
     end_erpm = erpms[-1] if erpms else None
