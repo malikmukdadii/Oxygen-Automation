@@ -432,15 +432,18 @@ class OxygenBackend:
 
     def read_button(self, name):
         with self.lock:
-            if name in self.do_channels:
-                cid = self.do_channels[name]
-            else:
-                self._pin_inputs(self.adapter.list_channels())
+            # Feedback/trigger identities are pinned once at connect(); never rediscover on poll.
+            if name not in self.do_channels:
                 matches = [cid for key, (channel, cid) in self.input_ids.items()
                            if key.startswith('trigger:') and channel == name]
                 if len(matches) != 1:
-                    raise ScpiProtocolError('Unknown or ambiguous trigger')
+                    raise ScpiProtocolError(
+                        f'Unknown trigger {name!r}: not pinned at connect; restart explicitly '
+                        '(no rediscover-every-poll)')
                 cid = matches[0]
+                self.do_channels[name] = cid
+            else:
+                cid = self.do_channels[name]
             result = self._boolean(cid, 'DO_Value')
             self.error()
             return result

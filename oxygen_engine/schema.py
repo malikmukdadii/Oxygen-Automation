@@ -218,18 +218,21 @@ def load_profile(path, output, spec, *, open_loop: bool):
 
 
 def _validate_outputs(raw, *, physical: bool, open_loop: bool):
+    from .drive_limits import authorize_dispatcher_motor_max, motor_role_keys
+
     outputs = raw.get('outputs')
     if not isinstance(outputs, dict) or not outputs or set(outputs) - set(ROLES):
         raise ConfigError(
             'outputs must configure at least one known role: rzxa_voltage_demand and/or vesc_throttle')
     names, ids, bindings = set(), set(), set()
     for role, spec in outputs.items():
-        keys(spec, {
+        allowed = motor_role_keys() if role == MOTOR else {
             'role', 'channel', 'display_name', 'expected_id', 'channel_discovery_required', 'binding',
             'authorization', 'mode', 'source', 'const_property', 'min_aout_v', 'max_aout_v',
             'startup_aout_v', 'neutral_aout_v', 'neutral_verified', 'mapping_verified', 'mapping',
             'output_enable', 'completion_policy', 'on_cancel', 'on_fault', 'on_shutdown',
-        }, role)
+        }
+        keys(spec, allowed, role)
         binding = exact_name(spec.get('binding'), f'{role} binding')
         if binding in bindings:
             raise ConfigError('Output bindings cannot alias')
@@ -270,9 +273,10 @@ def _validate_outputs(raw, *, physical: bool, open_loop: bool):
             ids.add(cid)
         # Operator-configured max is authoritative within the absolute ConstOutput span.
         number(spec.get('min_aout_v'), 'minimum', 0, 0)
-        number(spec['max_aout_v'], 'maximum', .001, ABSOLUTE_AOUT_MAX_V)
-        if not physical and role == MOTOR and spec['max_aout_v'] > MOTOR_EXAMPLE_MAX_V:
-            raise ConfigError('Simulated motor clamp remains 0.4 V unless physically authorized')
+        if role == MOTOR:
+            authorize_dispatcher_motor_max(spec, physical=physical)
+        else:
+            number(spec['max_aout_v'], 'maximum', .001, ABSOLUTE_AOUT_MAX_V)
         policy = 'preserve_demand' if role == SUPPLY else 'return_neutral'
         if any(spec.get(k) != policy for k in ('on_cancel', 'on_fault', 'on_shutdown')):
             raise ConfigError('Supply must preserve demand; motor must attempt neutral on termination')

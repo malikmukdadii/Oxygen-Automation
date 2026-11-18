@@ -85,14 +85,11 @@ assignments, measurement interpretation and the inspected local enable flags. Di
 are not polled. Startup diagnostics list both enabled and disabled entries, exact AOUT mappings and
 voltage limits. Active profiles pause DOUT polling; busy pulses can be unobservable and are not queued.
 
-[Future coordinated regeneration](docs/regenerative-extension-plan.md) is a design/commissioning
-plan only. `Braking Control` is not active; no brake role or coordinated braking is implemented.
-
 ## Coordinated DC-to-AC experiments
 
-The separate `run-experiment` layer sequences the two existing outputs through the validated
-V3 writer. It preserves `dispatcher.json`, single-output profiles and working DOUT assignments.
-Only one dispatcher/experiment CLI may own an OXYGEN endpoint at a time.
+The `run-experiment` layer sequences the two existing outputs through the validated V3 writer for
+`grid` / `dynamic` plans. It preserves `dispatcher.json`, single-output profiles and working DOUT
+assignments. Only one dispatcher/experiment CLI may own an OXYGEN endpoint at a time.
 
 - `experiments/dc_ac_grid.example.json`: 36/38/40 V bus targets; 0.25/0.35 V drive enabled.
   The planned 0.45/0.55 V candidates remain disabled above today's 0.40 V clamp.
@@ -108,10 +105,22 @@ Only one dispatcher/experiment CLI may own an OXYGEN endpoint at a time.
 ```
 
 See [commissioning, feedback bindings and expected timeline](docs/efficiency-experiments.md).
-Hardware execution requires fresh measured bus/current/CAN feedback, real source/sink readiness,
-commissioned limits and (for a grid) native Matrix Sampler accepted-count/validity signals.
-Successful writes alone never qualify a grid point. Examples intentionally cannot execute on
-hardware unchanged; the known supply SCPI/property-loss issue must first be resolved.
+
+## Regenerative deceleration
+
+`regenerative_deceleration` plans use the same V3 write path with phases A–F, commissioned drive
+limits, trial-scoped sync-CSV energy analysis, and explicit simulated vs measured feedback.
+Use the dedicated command or schema-dispatch via `run-experiment`:
+
+```powershell
+.\.venv-scpi\Scripts\python.exe -m oxygen_engine run-regen-experiment --experiment experiments/regen_release_comparison.example.json
+.\.venv-scpi\Scripts\python.exe -m oxygen_engine run-experiment --experiment experiments/regen_release_comparison.example.json --execute --confirm-simulated-output
+.\.venv-scpi\Scripts\python.exe -m oxygen_engine analyze-regen-csv --csv path\to\sync.csv --map dc_power_w=PowerDC --trial-id t1 --window-start 1 --window-end 3
+```
+
+See [regenerative deceleration commissioning](docs/regenerative-deceleration-commissioning.md).
+`Braking Control` remains unused. [Future ADC2 braking](docs/regenerative-extension-plan.md) is
+still design-only. Live physical regen stays disabled until verified; sim pass ≠ physical enable.
 
 ## Tests
 
