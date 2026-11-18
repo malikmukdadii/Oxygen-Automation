@@ -415,13 +415,20 @@ def test_physical_execution_requires_live(monkeypatch):
     ]) == 1
 
 
-def test_cli_defaults_to_dispatcher_json_or_example(monkeypatch, capsys):
+@pytest.mark.parametrize('operator_present', [False, True])
+def test_cli_defaults_to_dispatcher_json_or_example(tmp_path, monkeypatch, capsys, operator_present):
     monkeypatch.setattr(socket, 'create_connection', lambda *a, **k: pytest.fail('must not connect'))
-    # With no local dispatcher.json, default bindings resolve to dispatcher.example.json.
+    raw = _absolutize_profiles(json.loads(EXAMPLE.read_text()))
+    (tmp_path / 'dispatcher.example.json').write_text(json.dumps(raw))
+    if operator_present:
+        raw['assignments'][0]['trigger'] = 'Operator exact button'
+        (tmp_path / 'dispatcher.json').write_text(json.dumps(raw))
+    monkeypatch.setattr('oxygen_engine.main._project_root', lambda: tmp_path)
     assert main(['dispatch-patterns']) == 0
     plan = json.loads(capsys.readouterr().out)
     assert plan['schema_version'] == 3
     assert plan['control_mode'] == 'open_loop'
+    assert plan['assignments'][0]['trigger'] == ('Operator exact button' if operator_present else 'DO 3/1 Sim')
 
 
 def test_legacy_global_config_flag_is_retired():

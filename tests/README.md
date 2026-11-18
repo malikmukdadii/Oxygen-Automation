@@ -16,6 +16,9 @@ Primary coverage for the unified dispatcher:
 - `tests/test_rzxa_relative_step.py` — all nine relative-demand grid points, no-write boundaries,
   invalid/unknown readback, runtime completion, motor-neutral/discrete prerequisites, physical
   commissioning gate, global ownership, and eight-button latency/rising-edge regressions
+- `tests/test_ces_motor_candidates.py` — staged 10/18/24/22 s motor waveforms, modeled coast and
+  braking, eight-name button rehearsal, cancellation/fault/communication loss, unchanged supply,
+  nonzero physical-neutral rejection, and explicit higher-limit authorization through 1.60 V
 
 The 12-point experiment test uses a test-only explicitly authorized 0.55 V configuration mirrored
 into memory. The shipped grid still enables only 0.25/0.35 V, producing six valid fake points and

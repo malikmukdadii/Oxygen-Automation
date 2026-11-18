@@ -5,6 +5,11 @@ Simulated and physical ConstOutput channels share one discovery, timeline, SCPI 
 
 **Verified scale:** 1.000 V AOUT = 80 V bus (`gain_bus_v_per_aout_v: 80`).
 
+**CES motor commissioning hold:** physical testing found 0 V drive demand causes braking,
+not coast. The local motor-neutral acknowledgement is invalidated and motor buttons disabled;
+physical dispatch is blocked pending review. Revised 10/18/24/22-second profiles are staged
+for **memory-only** rehearsal, not live use. See [CES motor commissioning](docs/ces-motor-profile-commissioning.md).
+
 ## Operator config
 
 Authoritative runtime file: **`dispatcher.json`** (gitignored; machine-specific).
@@ -22,6 +27,7 @@ Illustrative variants live under `examples/` and must not be confused with the a
 | `dispatcher.example.json` | Committed starter (memory dual-output) |
 | `examples/memory-dual.json` | Offline dual-output fixture |
 | `examples/ces-eight-button.json` | Offline eight-button CES example; relative RZ-XA demand stepping |
+| `examples/ces-motor-commissioning.json` | Memory-only revised motor candidates; hypothetical 0.30 V coast / 1.00 V max |
 | `examples/supply-only.json` | Supply-only RZ-XA commissioning |
 | `examples/oxygen-demo.json` | Simulated OXYGEN demo |
 | `examples/physical-dual.json` | Physical dual-output template |
@@ -68,6 +74,12 @@ python -m venv .venv-scpi
 | Closed-loop | Requires a registered controller; otherwise `ControlNotReady` |
 
 ## Profiles
+
+The root motor profiles below retain their historical zero-neutral waveforms for compatibility;
+they are **not commissioned for the observed CES VESC mapping**. Staged replacements under
+`profiles/ces/` use the actual V3 schema, a modeled 0.30 V coast point, explicit braking phases,
+and higher drive demands. They cannot load under the physical neutral contract. No RZ-XA
+profile or physical voltage limit is raised by selecting the memory example.
 
 | Profile | Role |
 |---------|------|

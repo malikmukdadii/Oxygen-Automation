@@ -300,7 +300,8 @@ def _validate_outputs(raw, *, physical: bool, open_loop: bool):
         if any(spec.get(k) != policy for k in ('on_cancel', 'on_fault', 'on_shutdown')):
             raise ConfigError('Supply must preserve demand; motor must attempt neutral on termination')
         if role == MOTOR:
-            number(spec.get('neutral_aout_v'), 'motor neutral', 0, 0)
+            number(spec.get('neutral_aout_v'), 'motor neutral', 0,
+                   spec['max_aout_v'] if raw['transport'] == 'memory' else 0)
             if spec.get('completion_policy') != 'return_neutral':
                 raise ConfigError('Motor completion_policy must be return_neutral')
             if physical and spec.get('neutral_verified') is not True:

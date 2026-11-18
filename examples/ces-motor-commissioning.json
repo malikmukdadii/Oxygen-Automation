@@ -1,0 +1,105 @@
+{
+  "schema_version": 3,
+  "control": {"mode": "open_loop"},
+  "transport": "memory",
+  "live_control": {
+    "enable_physical_aout": false,
+    "enable_rzxa_output_toggle": false,
+    "enable_real_rzxa_scpi": false,
+    "require_explicit_hardware_authorization": true
+  },
+  "connection": {"host": "127.0.0.1", "port": 10001, "timeout_s": 0.5},
+  "outputs": {
+    "rzxa_voltage_demand": {
+      "role": "supply_voltage_demand",
+      "channel": null,
+      "display_name": "Takasago Voltage Control (FAKE memory fixture)",
+      "expected_id": null,
+      "channel_discovery_required": true,
+      "binding": "supply_demand_fixture",
+      "authorization": {"simulation": true, "physical": false},
+      "mode": "ConstOutput",
+      "source": "CONST0",
+      "const_property": "TRION/SourceChannel_A_CONST/Const0",
+      "min_aout_v": 0.0,
+      "max_aout_v": 0.5,
+      "startup_aout_v": 0.0,
+      "completion_policy": "hold_final",
+      "on_cancel": "preserve_demand",
+      "on_fault": "preserve_demand",
+      "on_shutdown": "preserve_demand",
+      "mapping_verified": false,
+      "mapping": {
+        "type": "linear_provisional",
+        "full_scale_aout_v": 10.0,
+        "assumed_full_scale_bus_v": 800.0,
+        "gain_bus_v_per_aout_v": 80.0,
+        "verified": false
+      },
+      "output_enable": "NOT_CONTROLLED_BY_AOUT"
+    },
+    "vesc_throttle": {
+      "role": "motor_throttle",
+      "channel": null,
+      "display_name": "FAKE CES motor candidate; 0.30 V coast and 1.00 V ceiling are NOT physical approvals",
+      "expected_id": null,
+      "channel_discovery_required": true,
+      "binding": "motor_throttle_fixture",
+      "authorization": {"simulation": true, "physical": false},
+      "mode": "ConstOutput",
+      "source": "CONST0",
+      "const_property": "TRION/SourceChannel_A_CONST/Const0",
+      "min_aout_v": 0.0,
+      "max_aout_v": 1.0,
+      "commissioned_drive_limit_v": 1.0,
+      "higher_drive_limit_authorized": true,
+      "neutral_aout_v": 0.3,
+      "neutral_verified": false,
+      "mapping_verified": false,
+      "completion_policy": "return_neutral",
+      "on_cancel": "return_neutral",
+      "on_fault": "return_neutral",
+      "on_shutdown": "return_neutral"
+    }
+  },
+  "timing": {"poll_ms": 50, "max_trigger_gap_ms": 250, "interval_ms": 100, "max_lateness_ms": 250, "telemetry_poll_ms": 0},
+  "measurements": {},
+  "interlocks": {
+    "motor_supply_demands_v": [0.45, 0.45625, 0.4625, 0.46875, 0.475, 0.48125, 0.4875, 0.49375, 0.5],
+    "supply_demand_grid_commissioned": false,
+    "require_supply_demand_before_motor": true,
+    "supply_down_requires_motor_neutral": true,
+    "one_active_profile_global": true,
+    "external_emergency_stop_required_for_live": true
+  },
+  "recording": {"enabled": false, "markers": true},
+  "instruments": {"rzxa": {"adapter": "disabled", "enable_output_control": false}},
+  "assignments": [
+    {"name": "rzxa_to_40_hold", "trigger": "Ramp Enable", "output": "rzxa_voltage_demand", "profile": "../profiles/rzxa_ramp_hold.json"},
+    {"name": "rzxa_down", "trigger": "Ramp Disable", "output": "rzxa_voltage_demand", "profile": "../profiles/rzxa_ramp_down.json"},
+    {"name": "motor_gentle", "trigger": "Motor Gentle", "output": "vesc_throttle", "profile": "../profiles/ces/motor_gentle.json"},
+    {"name": "regen_test", "trigger": "Run Regen Test", "output": "vesc_throttle", "profile": "../profiles/ces/motor_coast_compare.json"},
+    {"name": "driving_cycle", "trigger": "Run Driving Cycle", "output": "vesc_throttle", "profile": "../profiles/ces/motor_stop_go.json"},
+    {"name": "efficiency_scan", "trigger": "Run Efficiency Scan", "output": "vesc_throttle", "profile": "../profiles/ces/motor_three_level.json"},
+    {"name": "rzxa_voltage_down", "trigger": "RZ-XA Step Down", "output": "rzxa_voltage_demand", "profile": "../profiles/rzxa_voltage_down.json"},
+    {"name": "rzxa_voltage_up", "trigger": "RZ-XA Step Up", "output": "rzxa_voltage_demand", "profile": "../profiles/rzxa_voltage_up.json"}
+  ],
+  "simulation": {
+    "namespace": "FAKE_IN_PROCESS_ONLY",
+    "outputs": {
+      "supply_demand_fixture": {
+        "name": "FAKE supply analog demand", "id": "101",
+        "mode": "ConstOutput", "source": "CONST0", "property": "TRION/SourceChannel_A_CONST/Const0",
+        "unit": "V", "min_v": 0.0, "max_v": 0.5, "initial_v": 0.5
+      },
+      "motor_throttle_fixture": {
+        "name": "FAKE motor throttle", "id": "102",
+        "mode": "ConstOutput", "source": "CONST0", "property": "TRION/SourceChannel_A_CONST/Const0",
+        "unit": "V", "min_v": 0.0, "max_v": 1.0, "initial_v": 0.3
+      }
+    },
+    "sample_interval_s": 0.1,
+    "streaming": true,
+    "telemetry": {}
+  }
+}

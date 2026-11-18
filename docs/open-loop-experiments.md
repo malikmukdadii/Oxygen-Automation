@@ -2,6 +2,12 @@
 
 ## Current machine configuration
 
+**Superseding CES motor safety review:** subsequent physical observations contradict the old
+0 V neutral assumption used below. The local physical neutral acknowledgement is now invalidated
+and the four motor assignments disabled without renaming any DOUT. Historical descriptions and
+waveforms below are not live recommendations. See [staged CES motor profiles](ces-motor-profile-commissioning.md)
+for the new memory-only candidates, unchanged 0.40 V physical ceiling, and unresolved fault response.
+
 `dispatcher.json` remains the single authoritative, gitignored operator configuration. This
 review did not modify it, its authorizations, output limits, assignment enable flags or names.
 The inspected local file uses `transport: oxygen_scpi` and `control.mode: open_loop`.

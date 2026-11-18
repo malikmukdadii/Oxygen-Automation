@@ -1,7 +1,7 @@
 {
   "schema_version": 3,
   "name": "motor_stop_go",
-  "description": "Open-loop motor stop/go pulses; supply demand unchanged. Returns to neutral.",
+  "description": "LEGACY ZERO-DEMAND MAPPING ONLY: historical 0.20/0.35 V pulses ending at 0 V. On the CES VESC these levels are not a commissioned acceleration/coast sequence and 0 V produced braking. Do not deploy on that rig. Revised, uncommissioned memory-only replacement: profiles/ces/motor_stop_go.json.",
   "output": "vesc_throttle",
   "timeout_s": 30,
   "completion": {"mode": "return_neutral", "value": 0.0},

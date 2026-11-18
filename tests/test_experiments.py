@@ -43,6 +43,9 @@ def physical_config(tmp_path, limit=.4):
     raw['outputs'][SUPPLY]['channel'] = 'Takasago Voltage Control'
     raw['outputs'][MOTOR]['channel'] = 'Drive Control'
     raw['outputs'][MOTOR]['max_aout_v'] = limit
+    if limit > .4:
+        raw['outputs'][MOTOR]['commissioned_drive_limit_v'] = limit
+        raw['outputs'][MOTOR]['higher_drive_limit_authorized'] = True
     for a in raw['assignments']:
         a['profile'] = str((ROOT / 'examples' / a['profile']).resolve())
     path = tmp_path / 'bindings.json'

@@ -110,8 +110,8 @@ def authorize_dispatcher_motor_max(spec: dict, *, physical: bool) -> float:
     """Schema helper for dispatcher motor clamp.
 
     Experiment-level commissioning (grid/dynamic/regen plans) remains authoritative for
-    what may be *requested*. When output-level commissioning fields are present they must
-    be internally consistent. Simulated configs without those fields keep the 0.40 V default.
+    what may be *requested*. Output-level commissioning fields must be internally consistent
+    and are required above 0.40 V for both physical and simulated configurations.
     """
     max_v = number(spec['max_aout_v'], 'maximum', 0.001, ABSOLUTE_AOUT_MAX_V)
     has_output_commissioning = (
@@ -130,8 +130,8 @@ def authorize_dispatcher_motor_max(spec: dict, *, physical: bool) -> float:
                 'Raising vesc_throttle.max_aout_v above 0.40 V requires '
                 'higher_drive_limit_authorized=true and a commissioned_drive_limit_v')
         return max_v
-    if not physical and max_v > DEFAULT_COMMISSIONED_DRIVE_LIMIT_V + 1e-12:
-        raise ConfigError('Simulated motor clamp remains 0.4 V unless explicitly authorized')
+    if max_v > DEFAULT_COMMISSIONED_DRIVE_LIMIT_V + 1e-12:
+        raise ConfigError('Motor clamp remains 0.4 V unless explicitly authorized at output level')
     return max_v
 
 

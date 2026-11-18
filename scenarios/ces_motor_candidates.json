@@ -1,0 +1,15 @@
+{
+  "simulation_only": true,
+  "description": "FAKE memory-only CES motor candidate rehearsal, using exact operator button labels. Not a physical motor/coast/regen validation.",
+  "events": [
+    {"at_s": 0.2, "buttons": {"Motor Gentle": true}},
+    {"at_s": 0.4, "buttons": {"Motor Gentle": false}},
+    {"at_s": 11.0, "buttons": {"Run Regen Test": true}},
+    {"at_s": 11.2, "buttons": {"Run Regen Test": false}},
+    {"at_s": 30.0, "buttons": {"Run Driving Cycle": true}},
+    {"at_s": 30.2, "buttons": {"Run Driving Cycle": false}},
+    {"at_s": 55.0, "buttons": {"Run Efficiency Scan": true}},
+    {"at_s": 55.2, "buttons": {"Run Efficiency Scan": false}},
+    {"at_s": 78.0, "stop": true}
+  ]
+}

@@ -1,7 +1,7 @@
 {
   "schema_version": 3,
   "name": "motor_coast_compare",
-  "description": "Two 0.25 V demand trials with 1 s versus 5 s release ramps and 10 s neutral observation windows. Compare measured CAN speed decay and electrical power, not commanded speed. No brake command; neutral coasting depends on the commissioned VESC configuration. Not evidence of regenerative braking or stopped motion.",
+  "description": "LEGACY ZERO-DEMAND MAPPING ONLY: historical 0.25 V trials ending at 0 V. On the CES VESC, 0 V produced strong braking, not coast; this is neither a verified coasting trial nor proof of regeneration. Do not deploy on that rig. Revised, uncommissioned memory-only replacement: profiles/ces/motor_coast_compare.json.",
   "output": "vesc_throttle",
   "timeout_s": 65,
   "completion": {"mode": "return_neutral", "value": 0.0},
