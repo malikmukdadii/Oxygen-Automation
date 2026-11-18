@@ -26,6 +26,20 @@ def _default_dispatcher_path() -> Path:
     return root / 'dispatcher.example.json'
 
 
+def detect_experiment_schema(path: str | Path) -> str:
+    """Backward-compatible experiment schema detection for run-experiment."""
+    raw = json.loads(Path(path).read_text(encoding='utf-8-sig'))
+    if not isinstance(raw, dict):
+        raise DispatcherConfigError('Experiment config must be a JSON object')
+    if raw.get('experiment_type') == 'regenerative_deceleration':
+        return 'regen'
+    if raw.get('type') in {'grid', 'dynamic'} or raw.get('experiment_version') == 1:
+        return 'grid_dynamic'
+    raise DispatcherConfigError(
+        'Unrecognized experiment schema: expected grid/dynamic (experiment_version 1) '
+        'or regenerative_deceleration (experiment_type)')
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog='oxygen_engine',
@@ -91,6 +105,30 @@ def build_parser() -> argparse.ArgumentParser:
     dispatcher.add_argument('--confirm-physical-output', action='append', default=[], metavar='EXACT_CHANNEL_NAME',
                             help=argparse.SUPPRESS)
 
+    def _add_experiment_args(p: argparse.ArgumentParser) -> None:
+        p.add_argument('--bindings', default=str(_default_dispatcher_path()),
+                       help='V3 dispatcher JSON (grid/dynamic default; regen may override via experiment)')
+        p.add_argument('--experiment', required=True, help='Experiment plan JSON; V3 bindings remain separate')
+        p.add_argument('--execute', action='store_true')
+        p.add_argument('--memory', action='store_true',
+                       help='Grid/dynamic: no-I/O accelerated rehearsal retaining configured clamps')
+        p.add_argument('--confirm-simulated-output', action='store_true')
+        p.add_argument('--confirm-output', action='append', default=[])
+        p.add_argument('--log-file')
+        p.add_argument('--output-dir', help='Regen artifacts directory for results/CSV/JSONL')
+
+    experiment = sub.add_parser(
+        'run-experiment',
+        help='Preview/run grid|dynamic experiments, or dispatch regenerative_deceleration by schema',
+    )
+    _add_experiment_args(experiment)
+
+    regen = sub.add_parser(
+        'run-regen-experiment',
+        help='Validate or run regenerative_deceleration (explicit alias; same engine as schema dispatch)',
+    )
+    _add_experiment_args(regen)
+
     aout_discovery = sub.add_parser(
         'discover-aout',
         help='Read-only discovery/validation of configured AOUT roles from a V3 dispatcher JSON',
@@ -103,21 +141,6 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser('list-profiles', help='List JSON profiles under ./profiles (no engine lifecycle)')
 
-    experiment = sub.add_parser(
-        'run-experiment',
-        help='Validate or run a regenerative_deceleration experiment on the V3 dispatcher write path',
-    )
-    experiment.add_argument('--experiment', required=True, help='Experiment JSON path')
-    experiment.add_argument(
-        '--bindings',
-        help='Dispatcher JSON override (default: experiment.dispatcher_bindings)',
-    )
-    experiment.add_argument('--execute', action='store_true',
-                            help='Execute offline; default validates the plan only')
-    experiment.add_argument('--confirm-simulated-output', action='store_true',
-                            help='Required for offline memory execution (no physical actuation)')
-    experiment.add_argument('--output-dir', help='Artifacts directory for results/CSV/JSONL')
-
     analyze = sub.add_parser(
         'analyze-regen-csv',
         help='Offline energy analysis / trace export from an OXYGEN sync CSV (no hardware)',
@@ -126,6 +149,18 @@ def build_parser() -> argparse.ArgumentParser:
     analyze.add_argument('--simulated', action='store_true',
                          help='Label metrics as simulated (required for non-acquisition fixtures)')
     analyze.add_argument('--output-dir', default='logs/regen-analysis')
+    analyze.add_argument('--map', action='append', default=[], metavar='LOGICAL=COLUMN',
+                         help='Channel mapping override, e.g. dc_power_w=PowerDC (repeatable)')
+    analyze.add_argument('--trial-id', help='Associate analysis with a trial id (requires window/markers)')
+    analyze.add_argument('--window-start', type=float, help='Trial window start time_s')
+    analyze.add_argument('--window-end', type=float, help='Trial window end time_s')
+    analyze.add_argument('--marker-start', help='Start marker text in marker column')
+    analyze.add_argument('--marker-end', help='End marker text in marker column')
+    analyze.add_argument('--marker-column', default='marker', help='CSV column holding markers')
+    analyze.add_argument('--polarity', choices=['rzxa_supply_positive', 'invert'],
+                         default='rzxa_supply_positive',
+                         help='Sign convention: positive = RZ-XA supplying VESC by default')
+    analyze.add_argument('--time-unit', choices=['s', 'ms'], default='s')
     return parser
 
 
@@ -133,6 +168,26 @@ def cmd_dispatch_patterns(args: argparse.Namespace) -> int:
     from .dispatcher import run_dispatch_cli
 
     return run_dispatch_cli(args)
+
+
+def cmd_run_experiment(args: argparse.Namespace) -> int:
+    """Preserve grid/dynamic run-experiment; route regen schema to the regen runner."""
+    kind = detect_experiment_schema(args.experiment)
+    if kind == 'regen':
+        from .regen_experiment import run_experiment_cli as regen_cli
+        return regen_cli(args)
+    from .experiment_cli import run_experiment_cli
+    return run_experiment_cli(args)
+
+
+def cmd_run_regen_experiment(args: argparse.Namespace) -> int:
+    from .regen_experiment import run_experiment_cli as regen_cli
+
+    kind = detect_experiment_schema(args.experiment)
+    if kind != 'regen':
+        raise DispatcherConfigError(
+            'run-regen-experiment requires experiment_type regenerative_deceleration')
+    return regen_cli(args)
 
 
 def cmd_discover_aout(args: argparse.Namespace) -> int:
@@ -213,16 +268,33 @@ def cmd_list_profiles(_args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_run_experiment(args: argparse.Namespace) -> int:
-    from .regen_experiment import run_experiment_cli
-
-    return run_experiment_cli(args)
-
-
 def cmd_analyze_regen_csv(args: argparse.Namespace) -> int:
     from .analysis_viz import analyze_csv_cli
 
-    report = analyze_csv_cli(args.csv, simulated=args.simulated, output_dir=args.output_dir)
+    channel_map = {}
+    for item in getattr(args, 'map', None) or []:
+        if '=' not in item:
+            raise DispatcherConfigError(f'--map expects LOGICAL=COLUMN, got {item!r}')
+        logical, column = item.split('=', 1)
+        channel_map[logical.strip()] = column.strip()
+    window = None
+    if args.window_start is not None or args.window_end is not None:
+        if args.window_start is None or args.window_end is None:
+            raise DispatcherConfigError('--window-start and --window-end must be provided together')
+        window = (args.window_start, args.window_end)
+    report = analyze_csv_cli(
+        args.csv,
+        simulated=args.simulated,
+        output_dir=args.output_dir,
+        channel_map=channel_map or None,
+        trial_id=args.trial_id,
+        window=window,
+        marker_start=args.marker_start,
+        marker_end=args.marker_end,
+        marker_column=args.marker_column,
+        polarity=args.polarity,
+        time_unit=args.time_unit,
+    )
     print(json.dumps(report, indent=2, allow_nan=False))
     return 0
 
@@ -254,12 +326,13 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(_normalize_argv(argv))
     handlers = {
+        'run-experiment': cmd_run_experiment,
+        'run-regen-experiment': cmd_run_regen_experiment,
         'discover-aout': cmd_discover_aout,
         'dispatch-patterns': cmd_dispatch_patterns,
         'watch-do': cmd_watch_do,
         'scpi-smoke': cmd_scpi_smoke,
         'list-profiles': cmd_list_profiles,
-        'run-experiment': cmd_run_experiment,
         'analyze-regen-csv': cmd_analyze_regen_csv,
     }
     try:

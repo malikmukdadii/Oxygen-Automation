@@ -51,11 +51,6 @@ python -m venv .venv-scpi
 .\.venv-scpi\Scripts\python.exe -m oxygen_engine discover-aout --bindings examples/oxygen-demo.json
 .\.venv-scpi\Scripts\python.exe -m oxygen_engine watch-do --channel "DO 3/1 Sim"
 .\.venv-scpi\Scripts\python.exe -m oxygen_engine list-profiles
-
-# Regenerative deceleration experiment (offline; extends V3 write path)
-.\.venv-scpi\Scripts\python.exe -m oxygen_engine run-experiment --experiment experiments/regen_release_comparison.example.json
-.\.venv-scpi\Scripts\python.exe -m oxygen_engine run-experiment --experiment experiments/regen_release_comparison.example.json --execute --confirm-simulated-output
-.\.venv-scpi\Scripts\python.exe -m oxygen_engine analyze-regen-csv --csv path\to\sync.csv --simulated
 ```
 
 ## Control model
@@ -90,11 +85,42 @@ assignments, measurement interpretation and the inspected local enable flags. Di
 are not polled. Startup diagnostics list both enabled and disabled entries, exact AOUT mappings and
 voltage limits. Active profiles pause DOUT polling; busy pulses can be unobservable and are not queued.
 
-Regenerative deceleration (`run-experiment`, phases A–F) reuses the V3 dispatcher write path,
-lease, logging and commissioned drive limits. See
-[regenerative deceleration commissioning](docs/regenerative-deceleration-commissioning.md).
+## Coordinated DC-to-AC experiments
+
+The `run-experiment` layer sequences the two existing outputs through the validated V3 writer for
+`grid` / `dynamic` plans. It preserves `dispatcher.json`, single-output profiles and working DOUT
+assignments. Only one dispatcher/experiment CLI may own an OXYGEN endpoint at a time.
+
+- `experiments/dc_ac_grid.example.json`: 36/38/40 V bus targets; 0.25/0.35 V drive enabled.
+  The planned 0.45/0.55 V candidates remain disabled above today's 0.40 V clamp.
+- `experiments/dynamic_motor.example.json`: bounded acceleration/current-demand plateaus and
+  neutral coast observation; no active braking or regulated speed claim.
+
+```powershell
+# Offline preview; no connection
+.\.venv-scpi\Scripts\python.exe -m oxygen_engine run-experiment --bindings dispatcher.json --experiment experiments/dc_ac_grid.example.json
+
+# Accelerated no-I/O rehearsal; does not populate OXYGEN's real matrix
+.\.venv-scpi\Scripts\python.exe -m oxygen_engine run-experiment --bindings dispatcher.json --experiment experiments/dc_ac_grid.example.json --memory --execute --confirm-simulated-output
+```
+
+See [commissioning, feedback bindings and expected timeline](docs/efficiency-experiments.md).
+
+## Regenerative deceleration
+
+`regenerative_deceleration` plans use the same V3 write path with phases A–F, commissioned drive
+limits, trial-scoped sync-CSV energy analysis, and explicit simulated vs measured feedback.
+Use the dedicated command or schema-dispatch via `run-experiment`:
+
+```powershell
+.\.venv-scpi\Scripts\python.exe -m oxygen_engine run-regen-experiment --experiment experiments/regen_release_comparison.example.json
+.\.venv-scpi\Scripts\python.exe -m oxygen_engine run-experiment --experiment experiments/regen_release_comparison.example.json --execute --confirm-simulated-output
+.\.venv-scpi\Scripts\python.exe -m oxygen_engine analyze-regen-csv --csv path\to\sync.csv --map dc_power_w=PowerDC --trial-id t1 --window-start 1 --window-end 3
+```
+
+See [regenerative deceleration commissioning](docs/regenerative-deceleration-commissioning.md).
 `Braking Control` remains unused. [Future ADC2 braking](docs/regenerative-extension-plan.md) is
-still design-only.
+still design-only. Live physical regen stays disabled until verified; sim pass ≠ physical enable.
 
 ## Tests
 
@@ -103,6 +129,10 @@ still design-only.
 ```
 
 Offline only. Passing tests do not commission hardware.
+
+For SCPI error attribution, raw readback/fault diagnostics and the investigated ladder failure,
+see [SCPI ramp fault investigation](docs/scpi-ramp-fault-investigation.md). A queued error after
+a write does not prove whether the hardware applied it; failed commands are never retried automatically.
 
 ## Safety
 

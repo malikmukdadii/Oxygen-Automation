@@ -52,10 +52,14 @@ class TrialResult:
     metrics: dict | None
     simulated: bool
     events: list[dict] = field(default_factory=list)
+    csv_window_start_s: float | None = None
+    csv_window_end_s: float | None = None
+    marker_start: str | None = None
+    marker_end: str | None = None
+    feedback_mode: str = 'simulated'
 
     def as_dict(self) -> dict:
-        payload = asdict(self)
-        return payload
+        return asdict(self)
 
 
 def _keys(value, allowed, label):
@@ -75,7 +79,7 @@ def load_experiment_config(path) -> dict:
         'bus_setpoints_v', 'speed_targets_erpm', 'release_durations_s', 'drive_demand_v',
         'accel', 'settle_s', 'recovery_observe_s', 'inter_trial_recovery_s', 'repetitions',
         'start_condition', 'energy', 'rzxa_completion_policy', 'output_dir',
-        'illustrative_only',
+        'illustrative_only', 'feedback_mode',
     }
     _keys(raw, root, 'experiment')
     if raw.get('schema_version') != 1:
@@ -84,13 +88,22 @@ def load_experiment_config(path) -> dict:
         raise ConfigError(f'experiment_type must be {EXPERIMENT_TYPE}')
     if type(raw.get('simulation_only')) is not bool or type(raw.get('physical_enabled')) is not bool:
         raise ConfigError('simulation_only and physical_enabled must be Boolean')
-    if raw['physical_enabled'] and not raw.get('higher_drive_limit_authorized', False):
-        # Physical may still run at 0.40; flag only gates higher demands.
-        pass
+    feedback_mode = raw.get('feedback_mode', 'simulated')
+    if feedback_mode not in {'simulated', 'measured'}:
+        raise ConfigError("feedback_mode must be 'simulated' or 'measured'")
+    raw['feedback_mode'] = feedback_mode
+    if raw['physical_enabled'] is True:
+        raise ConfigError(
+            'Live physical regen execution remains disabled until verified commissioning; '
+            'set physical_enabled=false (sim pass ≠ physical enable)')
     if raw['physical_enabled'] is True and raw['simulation_only'] is True:
         raise ConfigError('physical_enabled cannot be true while simulation_only is true')
     if raw.get('illustrative_only') is True and raw['physical_enabled'] is True:
         raise ConfigError('illustrative_only examples cannot enable physical execution')
+    if feedback_mode == 'measured' and raw['simulation_only']:
+        raise ConfigError('measured feedback_mode is incompatible with simulation_only')
+    if feedback_mode == 'simulated' and not raw['simulation_only']:
+        raise ConfigError('simulated feedback_mode requires simulation_only=true')
 
     number(raw.get('commissioned_drive_limit_v', DEFAULT_COMMISSIONED_DRIVE_LIMIT_V),
            'commissioned_drive_limit_v', 0.001, ABSOLUTE_AOUT_MAX_V)
@@ -178,11 +191,28 @@ def load_experiment_config(path) -> dict:
     }
 
     energy = raw.get('energy', {})
-    _keys(energy, {'channel_map', 'use_synthetic_when_no_csv', 'csv_path'}, 'energy')
+    _keys(energy, {
+        'channel_map', 'use_synthetic_when_no_csv', 'csv_path', 'trial_windows',
+        'polarity', 'time_unit', 'marker_column',
+    }, 'energy')
+    trial_windows = energy.get('trial_windows') or {}
+    if trial_windows and not isinstance(trial_windows, dict):
+        raise ConfigError('energy.trial_windows must be an object keyed by trial_id')
+    for key, window in trial_windows.items():
+        _keys(window, {'start_s', 'end_s', 'marker_start', 'marker_end'}, f'trial_windows[{key}]')
+        if 'start_s' in window or 'end_s' in window:
+            number(window['start_s'], 'window start', -1e9, 1e9)
+            number(window['end_s'], 'window end', -1e9, 1e9)
+            if window['end_s'] <= window['start_s']:
+                raise ConfigError(f'trial_windows[{key}]: end_s must exceed start_s')
     raw['energy'] = {
         'channel_map': energy.get('channel_map') or {},
         'use_synthetic_when_no_csv': bool(energy.get('use_synthetic_when_no_csv', True)),
         'csv_path': energy.get('csv_path'),
+        'trial_windows': trial_windows,
+        'polarity': energy.get('polarity', 'rzxa_supply_positive'),
+        'time_unit': energy.get('time_unit', 's'),
+        'marker_column': energy.get('marker_column', 'marker'),
     }
     if raw['energy']['csv_path'] is not None and not isinstance(raw['energy']['csv_path'], str):
         raise ConfigError('energy.csv_path must be a string path when provided')
@@ -271,6 +301,8 @@ class RegenExperimentRunner:
         self._feedback_pinned = False
         self._feedback_ids: dict[str, str] = {}
         self._active_target_erpm: float | None = None
+        self._active_trial_window: dict | None = None
+        self.feedback_mode = experiment.get('feedback_mode', 'simulated')
 
     def pin_feedback_identities(self) -> dict[str, str]:
         """Pin optional experiment feedback names once; never rediscover every poll."""
@@ -288,7 +320,8 @@ class RegenExperimentRunner:
         self._feedback_ids = identities
         self._feedback_pinned = True
         self.emit({'event': 'feedback_identities_pinned', 'identities': identities,
-                   'rediscover_every_poll': False})
+                   'rediscover_every_poll': False,
+                   'feedback_mode': self.feedback_mode})
         return dict(identities)
 
     def acquire_lease(self):
@@ -306,38 +339,78 @@ class RegenExperimentRunner:
         self.dispatcher.active_role = None
         self.emit({'event': 'experiment_lease_released', 'experiment': self.experiment['name']})
 
+    def _control_resolution_s(self) -> float:
+        return max(self.dispatcher.config.raw['timing']['interval_ms'] / 1000.0, 0.02)
+
     def _ramp(self, role: str, target: float, duration_s: float, phase: str):
+        """Absolute-deadline ramp scheduler; records cmd/ack timestamps; rejects undersized ramps."""
         current = self.dispatcher.verify(role)
-        steps = max(1, int(math.ceil(duration_s / max(
-            self.dispatcher.config.raw['timing']['interval_ms'] / 1000, 0.02))))
-        if duration_s <= 0 or math.isclose(current, target, abs_tol=1e-9):
+        resolution = self._control_resolution_s()
+        if duration_s < 0:
+            raise ConfigError(f'Ramp duration must be >= 0 (phase={phase})')
+        if math.isclose(current, target, abs_tol=1e-9):
+            cmd_at = self.dispatcher.clock()
             self.dispatcher.command(role, target)
-            self.emit({'event': 'experiment_setpoint', 'phase': phase, 'output': role,
-                       'nominal_v': target, 'acknowledged_v': target})
+            ack_at = self.dispatcher.clock()
+            self.emit({
+                'event': 'experiment_setpoint', 'phase': phase, 'output': role,
+                'nominal_v': target, 'acknowledged_v': target,
+                'cmd_monotonic_s': cmd_at, 'ack_monotonic_s': ack_at,
+                'precise_ramp': False, 'note': 'already at target; single verify/write only',
+            })
             return
+        if duration_s == 0:
+            cmd_at = self.dispatcher.clock()
+            self.dispatcher.command(role, target)
+            ack_at = self.dispatcher.clock()
+            self.emit({
+                'event': 'experiment_setpoint', 'phase': phase, 'output': role,
+                'nominal_v': target, 'acknowledged_v': self.dispatcher.states[role].value,
+                'cmd_monotonic_s': cmd_at, 'ack_monotonic_s': ack_at,
+                'precise_ramp': False,
+                'note': 'duration_s=0 is a single write, not a precise ramp',
+            })
+            return
+        if duration_s < resolution:
+            raise ConfigError(
+                f'Ramp duration {duration_s} s is below control resolution {resolution} s '
+                f'(phase={phase}); refuse invalid timing rather than invent a precise ramp')
+        steps = max(2, int(math.ceil(duration_s / resolution)))
+        started = self.dispatcher.clock()
         for index in range(1, steps + 1):
             if self.faulted:
                 raise ControlError('Experiment faulted; no auto-resume')
             frac = index / steps
             value = current + (target - current) * frac
-            began = self.dispatcher.clock()
+            deadline = started + duration_s * frac
+            cmd_at = self.dispatcher.clock()
             self.dispatcher.command(role, value)
-            latency = self.dispatcher.clock() - began
+            ack_at = self.dispatcher.clock()
             self.emit({
                 'event': 'experiment_setpoint', 'phase': phase, 'output': role,
                 'nominal_v': value, 'acknowledged_v': self.dispatcher.states[role].value,
-                'scpi_latency_s': latency,
-                'note': 'nominal vs acknowledged distinguished; SCPI latency not hard real-time',
+                'cmd_monotonic_s': cmd_at, 'ack_monotonic_s': ack_at,
+                'deadline_monotonic_s': deadline,
+                'scpi_latency_s': ack_at - cmd_at,
+                'precise_ramp': True,
+                'note': 'absolute-deadline scheduler; nominal vs acknowledged distinguished',
             })
-            remaining = duration_s * (1 - frac)
-            if remaining > 0:
-                self.dispatcher.wait(duration_s / steps)
+            now = self.dispatcher.clock()
+            if deadline > now:
+                self.dispatcher.wait(deadline - now)
 
     def read_erpm(self) -> float | None:
         self.pin_feedback_identities()
+        if self.feedback_mode == 'measured':
+            if self.feedback_provider is None:
+                raise InterlockError('measured feedback_mode requires a measured ERPM provider')
+            value = self.feedback_provider('erpm')
+            if value is None:
+                raise InterlockError('measured ERPM unavailable')
+            return value
         if self.feedback_provider is not None:
             return self.feedback_provider('erpm')
-        # Open-loop memory: synthesize a monotonic proxy from motor demand (simulated only).
+        # Simulated only: demand-proxy ERPM is explicitly synthetic.
         demand = self.dispatcher.states[MOTOR].value or 0.0
         peak = self._active_target_erpm
         if peak is None:
@@ -347,8 +420,16 @@ class RegenExperimentRunner:
 
     def read_bus_v(self) -> float | None:
         self.pin_feedback_identities()
+        if self.feedback_mode == 'measured':
+            if self.feedback_provider is None:
+                raise InterlockError('measured feedback_mode requires a measured bus provider')
+            value = self.feedback_provider('bus_v')
+            if value is None:
+                raise InterlockError('measured bus voltage unavailable')
+            return value
         if self.feedback_provider is not None:
             return self.feedback_provider('bus_v')
+        # Simulated only: infer from demand mapping (not measured bus).
         gain = self.dispatcher.outputs[SUPPLY]['mapping']['gain_bus_v_per_aout_v']
         return (self.dispatcher.states[SUPPLY].value or 0.0) * gain
 
@@ -420,16 +501,39 @@ class RegenExperimentRunner:
             'software_neutral_is_not_estop': True,
         })
 
-    def analyze_trial(self, plan: dict, drive_v: float) -> EnergyMetrics:
+    def analyze_trial(self, plan: dict, drive_v: float, trial_id: str,
+                      window: dict | None) -> EnergyMetrics:
+        from .energy_analysis import extract_trial_series, load_sync_csv
+
         energy_cfg = self.experiment['energy']
         if energy_cfg.get('csv_path'):
-            from .energy_analysis import load_sync_csv
-            series = load_sync_csv(
+            if self.feedback_mode == 'simulated':
+                raise ConfigError('Refusing measured sync CSV while feedback_mode=simulated')
+            full = load_sync_csv(
                 energy_cfg['csv_path'],
                 channel_map=energy_cfg.get('channel_map'),
                 simulated=False,
+                polarity=energy_cfg.get('polarity', 'rzxa_supply_positive'),
+                time_unit=energy_cfg.get('time_unit', 's'),
+                marker_column=energy_cfg.get('marker_column', 'marker'),
+            )
+            binding = (energy_cfg.get('trial_windows') or {}).get(trial_id) or window
+            if not binding:
+                raise ConfigError(
+                    f'No trial window/markers for trial_id={trial_id}; '
+                    'refusing to apply whole sync CSV to every trial')
+            series = extract_trial_series(
+                full,
+                trial_id=trial_id,
+                window=((binding.get('start_s'), binding.get('end_s'))
+                        if binding.get('start_s') is not None else None),
+                marker_start=binding.get('marker_start'),
+                marker_end=binding.get('marker_end'),
+                allow_whole_series=False,
             )
         elif energy_cfg.get('use_synthetic_when_no_csv', True):
+            if self.feedback_mode == 'measured':
+                raise ConfigError('measured feedback_mode forbids synthetic energy series')
             start_erpm = plan.get('target_erpm') or self.read_erpm() or 5000.0
             series = synthetic_regen_series(
                 release_duration_s=plan['release_duration_s'],
@@ -438,6 +542,7 @@ class RegenExperimentRunner:
                 drive_peak_v=drive_v,
                 observe_s=self.experiment['recovery_observe_s'],
             )
+            series.trial_id = trial_id
         else:
             raise ConfigError('No sync CSV provided and synthetic series disabled')
         return compute_metrics(series, bus_target_v=plan['bus_voltage_v'])
@@ -478,6 +583,8 @@ class RegenExperimentRunner:
 
         drive_v = self.experiment['drive_demand_v']
         self._active_target_erpm = plan.get('target_erpm')
+        marker_start = f'REGEN_D_START_{trial_id}'
+        marker_end = f'REGEN_E_END_{trial_id}'
         try:
             self.phase_a_establish_bus(plan['bus_voltage_v'])
             self.phase_b_accelerate(drive_v, plan['bus_voltage_v'])
@@ -490,12 +597,25 @@ class RegenExperimentRunner:
                     bus_voltage_v=plan['bus_voltage_v'], drive_demand_v=drive_v,
                     target_erpm=plan.get('target_erpm'), valid=False, invalid_reason=reason,
                     phase='C_starting_condition_verification', metrics=None,
-                    simulated=True, events=events,
+                    simulated=self.feedback_mode == 'simulated', events=events,
+                    feedback_mode=self.feedback_mode,
                 )
+            window_start = self.dispatcher.clock()
+            self.emit({'event': 'trial_marker', 'marker': marker_start, 'trial_id': trial_id,
+                       'monotonic_s': window_start})
             self.phase_d_regen_decel(plan['release_duration_s'])
             self.phase_e_recovery_observe()
+            window_end = self.dispatcher.clock()
+            self.emit({'event': 'trial_marker', 'marker': marker_end, 'trial_id': trial_id,
+                       'monotonic_s': window_end})
             self.phase_f_complete()
-            metrics = self.analyze_trial(plan, drive_v)
+            window = {
+                'start_s': window_start,
+                'end_s': window_end,
+                'marker_start': marker_start,
+                'marker_end': marker_end,
+            }
+            metrics = self.analyze_trial(plan, drive_v, trial_id, window)
             self.dispatcher.wait(self.experiment['inter_trial_recovery_s'])
             return TrialResult(
                 trial_id=trial_id, comparison_axis=plan['comparison_axis'],
@@ -504,6 +624,9 @@ class RegenExperimentRunner:
                 target_erpm=plan.get('target_erpm'), valid=True, invalid_reason=None,
                 phase='complete', metrics=metrics.as_dict(),
                 simulated=metrics.simulated, events=events,
+                csv_window_start_s=window_start, csv_window_end_s=window_end,
+                marker_start=marker_start, marker_end=marker_end,
+                feedback_mode=self.feedback_mode,
             )
         except Exception as exc:
             self.faulted = True
@@ -637,10 +760,13 @@ def validate_experiment_plan(experiment_path, dispatcher_path) -> dict:
 
 def _resolve_dispatcher_bindings(experiment: dict, experiment_path: Path, bindings_arg: str | None) -> Path:
     root = Path(__file__).resolve().parent.parent
+    defaults = {
+        (root / 'dispatcher.json').resolve(),
+        (root / 'dispatcher.example.json').resolve(),
+    }
     candidates = []
-    if bindings_arg:
-        candidates.append(Path(bindings_arg))
     configured = experiment.get('dispatcher_bindings')
+    # Prefer experiment-declared bindings over the generic CLI default dispatcher path.
     if configured:
         candidates.extend([
             Path(configured),
@@ -648,6 +774,12 @@ def _resolve_dispatcher_bindings(experiment: dict, experiment_path: Path, bindin
             experiment_path.parent / configured,
             experiment_path.parent.parent / configured,
         ])
+    if bindings_arg:
+        binding_path = Path(bindings_arg)
+        resolved = binding_path.resolve()
+        explicit = resolved not in defaults or not configured
+        if explicit:
+            candidates.insert(0, binding_path)
     for candidate in candidates:
         resolved = candidate.resolve()
         if resolved.is_file():

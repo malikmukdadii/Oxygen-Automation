@@ -10,5 +10,13 @@ Primary coverage for the unified dispatcher:
 
 - `tests/test_dispatcher_v3.py` — schema v3, open-loop cleanup, closed-loop not-ready, memory scenario
 - `tests/test_aout_discovery.py` — read-only AOUT discovery
+- `tests/test_experiments.py` — coordinated grid/dynamic memory integration, explicit higher-limit
+  commissioning gates, native capture validity, feedback faults, endpoint ownership and scripted SCPI
+- `tests/test_scpi_ramp_faults.py` — mid-ramp errors/readback failures with no live socket creation
+
+The 12-point experiment test uses a test-only explicitly authorized 0.55 V configuration mirrored
+into memory. The shipped grid still enables only 0.25/0.35 V, producing six valid fake points and
+six disabled candidates. It does not raise the operator's 0.40 V clamp or populate a real matrix.
+See `docs/efficiency-experiments.md` for offline commands and commissioning requirements.
 
 Legacy mock-engine / SCPI / watch-do / constant-pattern tests remain for the diagnostic stack.

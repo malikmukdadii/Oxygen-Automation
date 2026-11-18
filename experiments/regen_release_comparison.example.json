@@ -5,6 +5,7 @@
   "description": "Illustrative offline comparison of Drive Control release duration at constant bus and start ERPM. Not commissioned for physical use. Braking Control unused. Higher drive candidates are planning-only and disabled.",
   "simulation_only": true,
   "physical_enabled": false,
+  "feedback_mode": "simulated",
   "illustrative_only": true,
   "dispatcher_bindings": "examples/memory-regen.json",
   "commissioned_drive_limit_v": 0.40,

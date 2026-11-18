@@ -51,9 +51,11 @@ class SyncSeries:
     dc_power_w: list[float] = field(default_factory=list)
     erpm: list[float] = field(default_factory=list)
     drive_control_v: list[float] = field(default_factory=list)
+    markers: list[str] = field(default_factory=list)
     simulated: bool = False
     alignment_uncertain: bool = False
     source: str = 'sync_csv'
+    trial_id: str | None = None
 
     def __len__(self) -> int:
         return len(self.time_s)
@@ -101,19 +103,39 @@ def validate_series(series: SyncSeries) -> None:
 
 
 def trapezoidal_energy(time_s: list[float], power_w: list[float]) -> tuple[float, float, float]:
-    """Positive P_DC = RZ-XA supplying VESC; negative = toward RZ-XA."""
+    """Positive P_DC = RZ-XA supplying VESC; negative = toward RZ-XA.
+
+    Intervals that cross zero are split at the interpolated zero-crossing so a
+    +10→−10 W / 1 s segment contributes 2.5 J in and 2.5 J return (not a cancelled avg).
+    """
     e_in = 0.0
     e_return = 0.0
     for index in range(1, len(time_s)):
         dt = time_s[index] - time_s[index - 1]
         if dt <= 0:
             continue
-        avg = 0.5 * (power_w[index] + power_w[index - 1])
-        energy = avg * dt
-        if energy >= 0:
-            e_in += energy
+        p0 = power_w[index - 1]
+        p1 = power_w[index]
+        if p0 == 0 and p1 == 0:
+            continue
+        # Same-sign (including touching zero on one end): one trapezoid.
+        if p0 * p1 > 0 or p0 == 0 or p1 == 0:
+            energy = 0.5 * (p0 + p1) * dt
+            if energy >= 0:
+                e_in += energy
+            else:
+                e_return += -energy
+            continue
+        # Zero-crossing inside the sample: split into positive and negative subintervals.
+        frac = abs(p0) / (abs(p0) + abs(p1))
+        dt_pos = dt * frac if p0 > 0 else dt * (1.0 - frac)
+        dt_neg = dt - dt_pos
+        if p0 > 0:
+            e_in += 0.5 * p0 * dt_pos
+            e_return += 0.5 * abs(p1) * dt_neg
         else:
-            e_return += -energy
+            e_return += 0.5 * abs(p0) * dt_neg
+            e_in += 0.5 * p1 * dt_pos
     return e_in, e_return, e_in - e_return
 
 
@@ -195,14 +217,22 @@ def load_sync_csv(
     simulated: bool = False,
     alignment_uncertain: bool = False,
     markers: dict | None = None,
+    polarity: str = 'rzxa_supply_positive',
+    time_unit: str = 's',
+    marker_column: str | None = 'marker',
 ) -> SyncSeries:
     """Import OXYGEN sync acquisition CSV with configurable channel mapping."""
     path = Path(path)
     mapping = {**DEFAULT_CHANNEL_MAP, **(channel_map or {})}
+    if polarity not in {'rzxa_supply_positive', 'invert'}:
+        raise ConfigError("polarity must be 'rzxa_supply_positive' or 'invert'")
+    if time_unit not in {'s', 'ms'}:
+        raise ConfigError("time_unit must be 's' or 'ms'")
     with path.open(newline='', encoding='utf-8-sig') as handle:
         reader = csv.DictReader(handle)
         if not reader.fieldnames:
             raise ConfigError('CSV has no header')
+        fieldnames = list(reader.fieldnames)
         rows = list(reader)
     if not rows:
         raise ConfigError('CSV has no data rows')
@@ -213,24 +243,112 @@ def load_sync_csv(
             return []
         return [_finite(row[name], name) for row in rows]
 
+    times = column('time_s')
+    if not times:
+        raise ConfigError('CSV mapping must include time_s')
+    if time_unit == 'ms':
+        times = [t / 1000.0 for t in times]
+
+    currents = column('dc_current_a')
+    powers = column('dc_power_w')
+    if polarity == 'invert':
+        currents = [-c for c in currents]
+        powers = [-p for p in powers]
+
+    marker_values: list[str] = []
+    marker_key = mapping.get('marker', marker_column)
+    if marker_key and marker_key in fieldnames:
+        marker_values = [(row.get(marker_key) or '').strip() for row in rows]
+
     series = SyncSeries(
-        time_s=column('time_s'),
+        time_s=times,
         dc_voltage_v=column('dc_voltage_v'),
-        dc_current_a=column('dc_current_a'),
-        dc_power_w=column('dc_power_w'),
+        dc_current_a=currents,
+        dc_power_w=powers,
         erpm=column('erpm'),
         drive_control_v=column('drive_control_v'),
+        markers=marker_values,
         simulated=simulated,
         alignment_uncertain=alignment_uncertain,
         source=str(path),
     )
     if markers:
-        # Marker alignment is advisory; missing markers flag uncertainty.
         missing = [key for key, value in markers.items() if value is None]
         if missing:
             series.alignment_uncertain = True
     validate_series(series)
     return series
+
+
+def _slice_series(series: SyncSeries, mask: list[bool], *, trial_id: str | None = None) -> SyncSeries:
+    if sum(1 for keep in mask if keep) < 2:
+        raise ConfigError('Trial window/markers leave fewer than two samples')
+
+    def take(values: list):
+        return [value for value, keep in zip(values, mask) if keep] if values else []
+
+    return SyncSeries(
+        time_s=take(series.time_s),
+        dc_voltage_v=take(series.dc_voltage_v),
+        dc_current_a=take(series.dc_current_a),
+        dc_power_w=take(series.dc_power_w),
+        erpm=take(series.erpm),
+        drive_control_v=take(series.drive_control_v),
+        markers=take(series.markers),
+        simulated=series.simulated,
+        alignment_uncertain=series.alignment_uncertain,
+        source=series.source,
+        trial_id=trial_id,
+    )
+
+
+def extract_trial_series(
+    series: SyncSeries,
+    *,
+    trial_id: str | None = None,
+    window: tuple[float, float] | None = None,
+    marker_start: str | None = None,
+    marker_end: str | None = None,
+    allow_whole_series: bool = False,
+) -> SyncSeries:
+    """Associate sync data with one trial via window and/or markers — never reuse whole CSV by default."""
+    if window is None and not (marker_start and marker_end):
+        if allow_whole_series:
+            out = SyncSeries(**{**asdict(series), 'trial_id': trial_id})
+            validate_series(out)
+            return out
+        raise ConfigError(
+            'Refusing to analyze whole sync CSV for a trial; provide window and/or start/end markers '
+            '(or allow_whole_series only for a single-trial fixture)')
+
+    start_t = None
+    end_t = None
+    if marker_start and marker_end:
+        if not series.markers:
+            raise ConfigError('Marker column required to bind trial by markers')
+        try:
+            start_idx = next(i for i, text in enumerate(series.markers) if text == marker_start)
+            end_idx = next(i for i, text in enumerate(series.markers) if text == marker_end and i >= start_idx)
+        except StopIteration as exc:
+            raise ConfigError(
+                f'Trial markers not found for trial_id={trial_id!r}: '
+                f'{marker_start!r} .. {marker_end!r}') from exc
+        start_t = series.time_s[start_idx]
+        end_t = series.time_s[end_idx]
+    if window is not None:
+        w0, w1 = window
+        if w1 <= w0:
+            raise ConfigError('Trial window end must be greater than start')
+        if start_t is None:
+            start_t, end_t = w0, w1
+        else:
+            # Markers define the primary association; window must agree.
+            if abs(start_t - w0) > 1e-6 or abs(end_t - w1) > 1e-6:
+                series.alignment_uncertain = True
+            start_t, end_t = w0, w1
+
+    mask = [start_t <= t <= end_t for t in series.time_s]
+    return _slice_series(series, mask, trial_id=trial_id)
 
 
 def synthetic_regen_series(

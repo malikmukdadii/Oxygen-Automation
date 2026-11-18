@@ -15,12 +15,13 @@ from oxygen_engine.drive_limits import (
 )
 from oxygen_engine.energy_analysis import (
     compute_metrics,
+    extract_trial_series,
     load_sync_csv,
     synthetic_regen_series,
     trapezoidal_energy,
 )
 from oxygen_engine.errors import AuthorizationError, ConfigError
-from oxygen_engine.main import main
+from oxygen_engine.main import detect_experiment_schema, main
 from oxygen_engine.memory_backend import MemoryBackend
 from oxygen_engine.oxygen_backend import OxygenBackend
 from oxygen_engine.regen_experiment import (
@@ -214,6 +215,14 @@ def test_energy_metrics_label_simulated_and_ratio():
     assert 'not mechanical efficiency' in ' '.join(metrics.notes)
 
 
+def test_trapezoidal_zero_crossing_split_analytical():
+    """+10 → −10 W over 1 s must yield 2.5 J in and 2.5 J return after zero-crossing split."""
+    e_in, e_return, e_net = trapezoidal_energy([0.0, 1.0], [10.0, -10.0])
+    assert e_in == pytest.approx(2.5)
+    assert e_return == pytest.approx(2.5)
+    assert e_net == pytest.approx(0.0)
+
+
 def test_trapezoidal_integration_and_csv_import(tmp_path):
     path = tmp_path / 'sync.csv'
     with path.open('w', newline='', encoding='utf-8') as handle:
@@ -255,15 +264,26 @@ def test_reject_invalid_release_timing():
         path.unlink(missing_ok=True)
 
 
+def test_schema_dispatch_preserves_grid_and_regen_paths():
+    assert detect_experiment_schema(EXPERIMENT_RELEASE) == 'regen'
+    assert detect_experiment_schema(ROOT / 'experiments' / 'dc_ac_grid.example.json') == 'grid_dynamic'
+    assert detect_experiment_schema(ROOT / 'experiments' / 'dynamic_motor.example.json') == 'grid_dynamic'
+
+
 def test_cli_run_experiment_plan_and_execute(tmp_path):
     assert main([
         'run-experiment',
         '--experiment', str(EXPERIMENT_RELEASE),
         '--bindings', str(MEMORY_REGEN),
     ]) == 0
+    assert main([
+        'run-regen-experiment',
+        '--experiment', str(EXPERIMENT_RELEASE),
+        '--bindings', str(MEMORY_REGEN),
+    ]) == 0
     out = tmp_path / 'artifacts'
     assert main([
-        'run-experiment',
+        'run-regen-experiment',
         '--experiment', str(EXPERIMENT_RELEASE),
         '--bindings', str(MEMORY_REGEN),
         '--execute',
@@ -274,20 +294,30 @@ def test_cli_run_experiment_plan_and_execute(tmp_path):
     assert list(out.glob('*-comparison.csv'))
 
 
+def test_cli_grid_path_still_previews():
+    assert main([
+        'run-experiment',
+        '--bindings', str(ROOT / 'dispatcher.example.json'),
+        '--experiment', str(ROOT / 'experiments' / 'dc_ac_grid.example.json'),
+    ]) == 0
+
+
 def test_cli_blocks_physical_enable(tmp_path):
     raw = json.loads(EXPERIMENT_RELEASE.read_text(encoding='utf-8'))
     raw['simulation_only'] = False
     raw['physical_enabled'] = True
     raw['illustrative_only'] = False
+    raw['feedback_mode'] = 'measured'
     path = tmp_path / 'physical.json'
     path.write_text(json.dumps(raw), encoding='utf-8')
+    # physical_enabled is rejected at plan load (config error -> exit 2) or execution (1).
     assert main([
-        'run-experiment',
+        'run-regen-experiment',
         '--experiment', str(path),
         '--bindings', str(MEMORY_REGEN),
         '--execute',
         '--confirm-simulated-output',
-    ]) == 1
+    ]) in {1, 2}
 
 
 def test_fault_does_not_auto_resume():
@@ -367,17 +397,23 @@ def test_analyze_regen_csv_cli(tmp_path):
     with csv_path.open('w', newline='', encoding='utf-8') as handle:
         writer = csv.DictWriter(
             handle,
-            fieldnames=['time_s', 'dc_voltage_v', 'dc_current_a', 'dc_power_w', 'erpm', 'drive_control_v'],
+            fieldnames=['t_ms', 'PowerDC', 'dc_voltage_v', 'dc_current_a', 'erpm', 'drive_control_v', 'marker'],
         )
         writer.writeheader()
         for index, t in enumerate(series.time_s):
+            marker = ''
+            if index == 0:
+                marker = 'T1_START'
+            elif index == len(series.time_s) - 1:
+                marker = 'T1_END'
             writer.writerow({
-                'time_s': t,
+                't_ms': t * 1000.0,
+                'PowerDC': series.dc_power_w[index],
                 'dc_voltage_v': series.dc_voltage_v[index],
                 'dc_current_a': series.dc_current_a[index],
-                'dc_power_w': series.dc_power_w[index],
                 'erpm': series.erpm[index],
                 'drive_control_v': series.drive_control_v[index],
+                'marker': marker,
             })
     out = tmp_path / 'analysis'
     assert main([
@@ -385,8 +421,82 @@ def test_analyze_regen_csv_cli(tmp_path):
         '--csv', str(csv_path),
         '--simulated',
         '--output-dir', str(out),
+        '--map', 'time_s=t_ms',
+        '--map', 'dc_power_w=PowerDC',
+        '--time-unit', 'ms',
+        '--trial-id', 't1',
+        '--marker-start', 'T1_START',
+        '--marker-end', 'T1_END',
     ]) == 0
-    assert (out / 'energy_metrics.json').exists()
+    assert (out / 'energy_metrics_t1.json').exists()
+
+
+def test_extract_trial_series_refuses_whole_csv(tmp_path):
+    path = tmp_path / 'multi.csv'
+    with path.open('w', newline='', encoding='utf-8') as handle:
+        writer = csv.DictWriter(handle, fieldnames=['time_s', 'dc_power_w', 'marker'])
+        writer.writeheader()
+        writer.writerow({'time_s': 0.0, 'dc_power_w': 1, 'marker': 'A'})
+        writer.writerow({'time_s': 1.0, 'dc_power_w': -1, 'marker': ''})
+        writer.writerow({'time_s': 2.0, 'dc_power_w': -2, 'marker': 'B'})
+        writer.writerow({'time_s': 3.0, 'dc_power_w': 0, 'marker': 'C'})
+    series = load_sync_csv(path, simulated=True)
+    with pytest.raises(ConfigError, match='whole sync CSV'):
+        extract_trial_series(series, trial_id='t1', allow_whole_series=False)
+    sliced = extract_trial_series(
+        series, trial_id='t1', marker_start='A', marker_end='B', allow_whole_series=False)
+    assert sliced.trial_id == 't1'
+    assert sliced.time_s[0] == pytest.approx(0.0)
+    assert sliced.time_s[-1] == pytest.approx(2.0)
+
+
+def test_ramp_rejects_below_control_resolution():
+    experiment = load_experiment_config(EXPERIMENT_RELEASE)
+    config = load_dispatcher_config(MEMORY_REGEN)
+    _, emit = _emit_collect()
+    clock = Clock()
+    backend = MemoryBackend(config, clock=clock)
+    dispatcher = Dispatcher(config, backend, emit, clock=clock, wait=clock.wait)
+    backend.connect()
+    dispatcher.prepare()
+    dispatcher.command(SUPPLY, 0.5)
+    runner = RegenExperimentRunner(experiment, dispatcher, emit)
+    with pytest.raises(ConfigError, match='control resolution'):
+        runner._ramp(MOTOR, 0.2, 0.01, 'undersized')
+
+
+def test_ramp_records_absolute_deadlines_and_cmd_ack():
+    experiment = load_experiment_config(EXPERIMENT_RELEASE)
+    config = load_dispatcher_config(MEMORY_REGEN)
+    records, emit = _emit_collect()
+    clock = Clock()
+    backend = MemoryBackend(config, clock=clock)
+    dispatcher = Dispatcher(config, backend, emit, clock=clock, wait=clock.wait)
+    backend.connect()
+    dispatcher.prepare()
+    dispatcher.command(SUPPLY, 0.5)
+    runner = RegenExperimentRunner(experiment, dispatcher, emit)
+    runner._ramp(MOTOR, 0.4, 0.1, 'B_controlled_accel')
+    setpoints = [r for r in records if r.get('event') == 'experiment_setpoint' and r.get('precise_ramp')]
+    assert setpoints
+    assert all('cmd_monotonic_s' in r and 'ack_monotonic_s' in r and 'deadline_monotonic_s' in r
+               for r in setpoints)
+
+
+def test_measured_feedback_forbids_demand_proxy():
+    experiment = load_experiment_config(EXPERIMENT_RELEASE)
+    experiment['feedback_mode'] = 'measured'
+    experiment['simulation_only'] = False
+    config = load_dispatcher_config(MEMORY_REGEN)
+    _, emit = _emit_collect()
+    clock = Clock()
+    backend = MemoryBackend(config, clock=clock)
+    dispatcher = Dispatcher(config, backend, emit, clock=clock, wait=clock.wait)
+    backend.connect()
+    dispatcher.prepare()
+    runner = RegenExperimentRunner(experiment, dispatcher, emit)
+    with pytest.raises(Exception, match='measured'):
+        runner.read_erpm()
 
 
 def test_sim_pass_does_not_mean_physical_enable():
@@ -394,4 +504,5 @@ def test_sim_pass_does_not_mean_physical_enable():
     assert experiment['physical_enabled'] is False
     assert experiment['simulation_only'] is True
     assert experiment.get('illustrative_only') is True
+    assert experiment['feedback_mode'] == 'simulated'
     assert DEFAULT_COMMISSIONED_DRIVE_LIMIT_V == pytest.approx(0.40)

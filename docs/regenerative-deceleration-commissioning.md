@@ -15,15 +15,18 @@ Do not rename roles or use ADC2 / Matrix Sampler as a substitute for sync acquis
 
 ## CLI
 
+`run-experiment` remains the grid/dynamic entry point. Regen plans are exposed via
+`run-regen-experiment`, and `run-experiment` also schema-dispatches `regenerative_deceleration`.
+
 ```powershell
 # Plan only (no connection)
-.\.venv-scpi\Scripts\python.exe -m oxygen_engine run-experiment --experiment experiments/regen_release_comparison.example.json
+.\.venv-scpi\Scripts\python.exe -m oxygen_engine run-regen-experiment --experiment experiments/regen_release_comparison.example.json
 
 # Offline memory execution (simulated energy labeled simulated)
 .\.venv-scpi\Scripts\python.exe -m oxygen_engine run-experiment --experiment experiments/regen_release_comparison.example.json --execute --confirm-simulated-output
 
-# Analyze an OXYGEN sync CSV export
-.\.venv-scpi\Scripts\python.exe -m oxygen_engine analyze-regen-csv --csv path\to\sync.csv --output-dir logs/regen-analysis
+# Analyze an OXYGEN sync CSV export for one trial window (never whole-file for multi-trial)
+.\.venv-scpi\Scripts\python.exe -m oxygen_engine analyze-regen-csv --csv path\to\sync.csv --map dc_power_w=PowerDC --trial-id t1 --window-start 1.0 --window-end 3.0 --output-dir logs/regen-analysis
 ```
 
 Example experiments (illustrative, `physical_enabled=false`):

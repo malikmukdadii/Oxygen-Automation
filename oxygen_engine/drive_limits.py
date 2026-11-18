@@ -107,25 +107,31 @@ def resolve_effective_drive_max(
 
 
 def authorize_dispatcher_motor_max(spec: dict, *, physical: bool) -> float:
-    """Schema helper: allow >0.40 V only with explicit commissioning acknowledgement."""
+    """Schema helper for dispatcher motor clamp.
+
+    Experiment-level commissioning (grid/dynamic/regen plans) remains authoritative for
+    what may be *requested*. When output-level commissioning fields are present they must
+    be internally consistent. Simulated configs without those fields keep the 0.40 V default.
+    """
     max_v = number(spec['max_aout_v'], 'maximum', 0.001, ABSOLUTE_AOUT_MAX_V)
-    commissioned = spec.get('commissioned_drive_limit_v', DEFAULT_COMMISSIONED_DRIVE_LIMIT_V)
-    commissioned = number(commissioned, 'commissioned_drive_limit_v', 0.001, ABSOLUTE_AOUT_MAX_V)
-    higher = spec.get('higher_drive_limit_authorized', False)
-    if type(higher) is not bool:
-        raise ConfigError('higher_drive_limit_authorized must be Boolean')
-    if max_v > commissioned + 1e-12:
-        raise ConfigError('vesc_throttle.max_aout_v cannot exceed commissioned_drive_limit_v')
-    if max_v > DEFAULT_COMMISSIONED_DRIVE_LIMIT_V + 1e-12:
-        if not higher:
+    has_output_commissioning = (
+        'commissioned_drive_limit_v' in spec or 'higher_drive_limit_authorized' in spec)
+    if has_output_commissioning:
+        commissioned = number(
+            spec.get('commissioned_drive_limit_v', DEFAULT_COMMISSIONED_DRIVE_LIMIT_V),
+            'commissioned_drive_limit_v', 0.001, ABSOLUTE_AOUT_MAX_V)
+        higher = spec.get('higher_drive_limit_authorized', False)
+        if type(higher) is not bool:
+            raise ConfigError('higher_drive_limit_authorized must be Boolean')
+        if max_v > commissioned + 1e-12:
+            raise ConfigError('vesc_throttle.max_aout_v cannot exceed commissioned_drive_limit_v')
+        if max_v > DEFAULT_COMMISSIONED_DRIVE_LIMIT_V + 1e-12 and not higher:
             raise ConfigError(
                 'Raising vesc_throttle.max_aout_v above 0.40 V requires '
                 'higher_drive_limit_authorized=true and a commissioned_drive_limit_v')
-        if not physical and not higher:
-            raise ConfigError('Simulated motor clamp remains 0.4 V unless explicitly authorized')
-    elif higher and commissioned <= DEFAULT_COMMISSIONED_DRIVE_LIMIT_V + 1e-12:
-        # Authorization flag without a raised commissioned limit is allowed but inert.
-        pass
+        return max_v
+    if not physical and max_v > DEFAULT_COMMISSIONED_DRIVE_LIMIT_V + 1e-12:
+        raise ConfigError('Simulated motor clamp remains 0.4 V unless explicitly authorized')
     return max_v
 
 

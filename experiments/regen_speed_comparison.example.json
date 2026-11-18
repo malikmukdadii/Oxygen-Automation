@@ -5,29 +5,68 @@
   "description": "Illustrative offline comparison of initial motor speed (ERPM targets) at constant bus and release duration. Speed targets above the modest baseline remain unenabled/uncommissioned. Not physical.",
   "simulation_only": true,
   "physical_enabled": false,
+  "feedback_mode": "simulated",
   "illustrative_only": true,
   "dispatcher_bindings": "examples/memory-regen.json",
-  "commissioned_drive_limit_v": 0.40,
+  "commissioned_drive_limit_v": 0.4,
   "higher_drive_limit_authorized": false,
   "drive_limit_candidates": [
-    {"value_v": 0.40, "enabled": true, "commissioned": true},
-    {"value_v": 0.55, "enabled": false, "commissioned": false},
-    {"value_v": 0.70, "enabled": false, "commissioned": false},
-    {"value_v": 0.85, "enabled": false, "commissioned": false}
+    {
+      "value_v": 0.4,
+      "enabled": true,
+      "commissioned": true
+    },
+    {
+      "value_v": 0.55,
+      "enabled": false,
+      "commissioned": false
+    },
+    {
+      "value_v": 0.7,
+      "enabled": false,
+      "commissioned": false
+    },
+    {
+      "value_v": 0.85,
+      "enabled": false,
+      "commissioned": false
+    }
   ],
   "comparison": "initial_speed",
-  "bus_setpoints_v": [40.0],
-  "speed_targets_erpm": [
-    {"target_erpm": 4000, "enabled": true, "commissioned": true, "max_speed_authorized": false},
-    {"target_erpm": 8000, "enabled": true, "commissioned": true, "max_speed_authorized": false},
-    {"target_erpm": 12000, "enabled": false, "commissioned": false, "max_speed_authorized": false}
+  "bus_setpoints_v": [
+    40.0
   ],
-  "release_durations_s": [0.50],
-  "drive_demand_v": 0.40,
-  "accel": {"ramp_s": 0.20, "hold_s": 0.20},
-  "settle_s": 0.10,
-  "recovery_observe_s": 0.50,
-  "inter_trial_recovery_s": 0.20,
+  "speed_targets_erpm": [
+    {
+      "target_erpm": 4000,
+      "enabled": true,
+      "commissioned": true,
+      "max_speed_authorized": false
+    },
+    {
+      "target_erpm": 8000,
+      "enabled": true,
+      "commissioned": true,
+      "max_speed_authorized": false
+    },
+    {
+      "target_erpm": 12000,
+      "enabled": false,
+      "commissioned": false,
+      "max_speed_authorized": false
+    }
+  ],
+  "release_durations_s": [
+    0.5
+  ],
+  "drive_demand_v": 0.4,
+  "accel": {
+    "ramp_s": 0.2,
+    "hold_s": 0.2
+  },
+  "settle_s": 0.1,
+  "recovery_observe_s": 0.5,
+  "inter_trial_recovery_s": 0.2,
   "repetitions": 2,
   "start_condition": {
     "erpm_tolerance": 1500,

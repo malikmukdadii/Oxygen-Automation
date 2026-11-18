@@ -6,7 +6,12 @@ import csv
 import json
 from pathlib import Path
 
-from .energy_analysis import SyncSeries, compute_metrics, load_sync_csv
+from .energy_analysis import (
+    SyncSeries,
+    compute_metrics,
+    extract_trial_series,
+    load_sync_csv,
+)
 
 
 def series_to_trace_rows(series: SyncSeries) -> list[dict]:
@@ -17,6 +22,8 @@ def series_to_trace_rows(series: SyncSeries) -> list[dict]:
             'P_DC_W': series.dc_power_w[index] if series.dc_power_w else None,
             'ERPM': series.erpm[index] if series.erpm else None,
             'Drive_Control_V': series.drive_control_v[index] if series.drive_control_v else None,
+            'marker': series.markers[index] if series.markers and index < len(series.markers) else '',
+            'trial_id': series.trial_id,
             'simulated': series.simulated,
         }
         rows.append(row)
@@ -53,6 +60,8 @@ def comparison_scatter_rows(results_json) -> list[dict]:
             'peak_neg_power_w': metrics.get('peak_neg_power_w'),
             'simulated': trial.get('simulated', metrics.get('simulated')),
             'invalid_reason': trial.get('invalid_reason'),
+            'csv_window_start_s': trial.get('csv_window_start_s'),
+            'csv_window_end_s': trial.get('csv_window_end_s'),
         })
     return rows
 
@@ -97,6 +106,7 @@ def write_report_markdown(path, results_json, *, series: SyncSeries | None = Non
             '',
             '## Attached series metrics',
             '',
+            f"- trial_id: {series.trial_id}",
             f"- simulated: {metrics.simulated}",
             f"- E_in (J): {metrics.e_in_j}",
             f"- E_return (J): {metrics.e_return_j}",
@@ -106,17 +116,53 @@ def write_report_markdown(path, results_json, *, series: SyncSeries | None = Non
     return path
 
 
-def analyze_csv_cli(csv_path, *, channel_map=None, simulated=False, output_dir='logs/regen-analysis') -> dict:
-    series = load_sync_csv(csv_path, channel_map=channel_map, simulated=simulated)
-    metrics = compute_metrics(series)
+def analyze_csv_cli(
+    csv_path,
+    *,
+    channel_map=None,
+    simulated=False,
+    output_dir='logs/regen-analysis',
+    trial_id=None,
+    window=None,
+    marker_start=None,
+    marker_end=None,
+    marker_column='marker',
+    polarity='rzxa_supply_positive',
+    time_unit='s',
+) -> dict:
+    series = load_sync_csv(
+        csv_path,
+        channel_map=channel_map,
+        simulated=simulated,
+        polarity=polarity,
+        time_unit=time_unit,
+        marker_column=marker_column,
+    )
+    # Whole-file analysis only when no trial association was requested.
+    allow_whole = trial_id is None and window is None and not marker_start and not marker_end
+    trial_series = extract_trial_series(
+        series,
+        trial_id=trial_id,
+        window=window,
+        marker_start=marker_start,
+        marker_end=marker_end,
+        allow_whole_series=allow_whole,
+    )
+    metrics = compute_metrics(trial_series)
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
-    trace = write_time_series_csv(out / 'p_dc_erpm_drive_trace.csv', series)
-    metrics_path = out / 'energy_metrics.json'
+    suffix = trial_id or 'whole'
+    trace = write_time_series_csv(out / f'p_dc_erpm_drive_trace_{suffix}.csv', trial_series)
+    metrics_path = out / f'energy_metrics_{suffix}.json'
     metrics_path.write_text(json.dumps(metrics.as_dict(), indent=2), encoding='utf-8')
     return {
         'metrics': metrics.as_dict(),
         'trace_csv': str(trace),
         'metrics_json': str(metrics_path),
-        'label': 'simulated' if series.simulated else 'sync_acquisition',
+        'trial_id': trial_id,
+        'window': list(window) if window else None,
+        'channel_map': channel_map or {},
+        'polarity': polarity,
+        'time_unit': time_unit,
+        'label': 'simulated' if trial_series.simulated else 'sync_acquisition',
     }
