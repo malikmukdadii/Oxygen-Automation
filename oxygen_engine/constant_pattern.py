@@ -276,11 +276,22 @@ def execute_timeline(pattern: ConstantPattern, setpoint: Callable[[float], None]
         phase = pattern.phase_at(elapsed)
         operation_started = clock()
         progress_due = phase != last_phase or elapsed - last_progress >= .5
-        if last_value is None or not math.isclose(last_value, value, abs_tol=1e-12, rel_tol=0):
-            setpoint(value)
-            last_value = value
-        if progress_due:
-            verify(value)
+        operation = 'setpoint'
+        try:
+            if last_value is None or not math.isclose(last_value, value, abs_tol=1e-12, rel_tol=0):
+                setpoint(value)
+                last_value = value
+            if progress_due:
+                operation = 'verify'
+                verify(value)
+        except Exception as exc:
+            emit({'event': 'timeline_io_failed', 'phase': phase, 'elapsed_s': elapsed,
+                  'nominal_duration_s': pattern.duration_s, 'requested_v': value,
+                  'operation': operation, 'io_ms': (clock() - operation_started) * 1000,
+                  'lateness_ms': late * 1000, 'interval_ms': interval_s * 1000,
+                  'max_lateness_ms': max_lateness_s * 1000,
+                  'error_type': type(exc).__name__, 'error': str(exc)})
+            raise
         operation_s = clock() - operation_started
         if operation_s > max_lateness_s:
             raise TimeoutError(f'Pattern I/O exceeded the lateness limit: {operation_s:.3f}s')

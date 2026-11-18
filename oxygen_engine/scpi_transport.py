@@ -7,7 +7,7 @@ import re
 import socket
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable
 
 logger = logging.getLogger(__name__)
@@ -123,9 +123,19 @@ def parse_scpi(raw: str) -> list:
 class ScpiErrorEntry:
     code: int
     message: str
+    raw_response: str | None = field(default=None, compare=False, repr=False)
 
     def __str__(self) -> str:
         return f"{self.code},{self.message}"
+
+
+class ScpiCommandError(ScpiProtocolError):
+    """Error-queue entry observed after a write, not proof of device-side causality."""
+
+    def __init__(self, command: str, entry: ScpiErrorEntry):
+        super().__init__(f"SCPI error after '{command}': {entry}")
+        self.command = command
+        self.entry = entry
 
 
 class ScpiTransport:
@@ -278,14 +288,18 @@ class ScpiTransport:
             payload = command.encode("utf-8")
             if not payload.endswith(self.line_ending):
                 payload += self.line_ending
+            wire_reply = None
             try:
                 assert self._sock is not None
                 self._sock.sendall(payload)
-                raw = strip_response_header(self._readline(), command)
+                wire_reply = self._readline()
+                raw = strip_response_header(wire_reply, command)
                 if re.match(r'^-[0-9]+\s*,', raw) and not re.match(r'^:?(SYSTem|SYST):(ERRor|ERR)', command, re.I):
                     raise ScpiProtocolError(f"SCPI error response: {raw}")
                 return raw
-            except (ScpiTimeoutError, ScpiProtocolError):
+            except (ScpiTimeoutError, ScpiProtocolError) as exc:
+                exc.raw_response = wire_reply
+                exc.query_command = command
                 # Never let a late/partial reply become the next query's response.
                 self._close_socket(notify=True)
                 raise
@@ -297,6 +311,7 @@ class ScpiTransport:
         """
         Send a command. If command ends with '?', return the response.
         Optionally query SYST:ERR? afterward for non-query commands.
+        This consumes one queue entry, not a per-command device acknowledgement.
         """
         with self._lock:
             stripped = command.strip()
@@ -306,13 +321,14 @@ class ScpiTransport:
             if query_error:
                 err = self.check_error()
                 if err and err.code != 0:
-                    raise ScpiProtocolError(f"SCPI error after '{stripped}': {err}")
+                    raise ScpiCommandError(stripped, err)
             return None
 
     def check_error(self) -> ScpiErrorEntry:
         """Query the instrument error queue (SYST:ERR?)."""
         raw = self.query("SYST:ERR?")
         entry = self._parse_error(raw)
+        entry.raw_response = raw
         self._last_error = entry
         if entry.code != 0:
             logger.error("SCPI error: %s", entry)

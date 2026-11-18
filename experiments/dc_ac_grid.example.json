@@ -1,0 +1,47 @@
+{
+  "experiment_version": 1,
+  "name": "dc_to_ac_initial_grid",
+  "type": "grid",
+  "bus_targets_v": [36, 38, 40],
+  "motor_targets": [
+    {"adc_v": 0.25, "enabled": true, "commissioned": true},
+    {"adc_v": 0.35, "enabled": true, "commissioned": true},
+    {"adc_v": 0.45, "enabled": false, "commissioned": false, "disabled_reason": "Exceeds today's 0.40 V clamp; separate commissioning required"},
+    {"adc_v": 0.55, "enabled": false, "commissioned": false, "disabled_reason": "Exceeds today's 0.40 V clamp; separate commissioning required"}
+  ],
+  "commissioned_drive_limit_v": 0.40,
+  "higher_drive_limit_authorized": false,
+  "commissioning": {
+    "adc1_current_mode_verified": false,
+    "feedback_and_limits_verified": false,
+    "native_matrix_verified": false,
+    "supply_scpi_fault_resolved": false
+  },
+  "timing": {
+    "poll_s": 0.25, "supply_ramp_s": 5, "motor_ramp_s": 4, "neutral_ramp_s": 4,
+    "bus_stable_s": 1, "bus_timeout_s": 10, "neutral_timeout_s": 20,
+    "settle_s": 3, "settle_timeout_s": 20, "capture_s": 5,
+    "max_supply_rate_v_per_s": 0.10, "max_motor_rate_v_per_s": 0.15
+  },
+  "safety": {
+    "max_age_s": 0.75, "bus_tolerance_v": 1, "bus_min_v": 0, "bus_max_v": 42,
+    "max_abs_dc_current_a": 2, "max_abs_motor_current_a": 5, "max_abs_erpm": 1500,
+    "bus_change_max_abs_erpm": 100, "dc_power_consistency_w": 5, "minimum_dc_power_w": 2,
+    "steady_bus_span_v": 0.5, "steady_dc_current_span_a": 0.2,
+    "steady_motor_current_span_a": 0.5, "steady_erpm_span": 100
+  },
+  "feedback": {
+    "dc_bus_voltage": {"channel": null, "unit": "V"},
+    "dc_current": {"channel": null, "unit": "A"},
+    "dc_power": {"channel": null, "unit": "W"},
+    "ac_power": {"channel": null, "unit": "W"},
+    "erpm": {"channel": null, "unit": "rpm"},
+    "motor_current": {"channel": null, "unit": "A"},
+    "acquisition_time_s": {"channel": null, "unit": "s"},
+    "vesc_telemetry_age_s": {"channel": null, "unit": "s"},
+    "matrix_sample_count": {"channel": null, "unit": ""},
+    "source_sink_ready": {"channel": null, "property": null},
+    "physical_fault": {"channel": null, "property": null},
+    "matrix_sample_valid": {"channel": null, "property": null}
+  }
+}

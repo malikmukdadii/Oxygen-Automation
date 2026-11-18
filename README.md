@@ -86,7 +86,32 @@ are not polled. Startup diagnostics list both enabled and disabled entries, exac
 voltage limits. Active profiles pause DOUT polling; busy pulses can be unobservable and are not queued.
 
 [Future coordinated regeneration](docs/regenerative-extension-plan.md) is a design/commissioning
-plan only. `Braking Control` is not active; no brake role or coordinated playback is implemented.
+plan only. `Braking Control` is not active; no brake role or coordinated braking is implemented.
+
+## Coordinated DC-to-AC experiments
+
+The separate `run-experiment` layer sequences the two existing outputs through the validated
+V3 writer. It preserves `dispatcher.json`, single-output profiles and working DOUT assignments.
+Only one dispatcher/experiment CLI may own an OXYGEN endpoint at a time.
+
+- `experiments/dc_ac_grid.example.json`: 36/38/40 V bus targets; 0.25/0.35 V drive enabled.
+  The planned 0.45/0.55 V candidates remain disabled above today's 0.40 V clamp.
+- `experiments/dynamic_motor.example.json`: bounded acceleration/current-demand plateaus and
+  neutral coast observation; no active braking or regulated speed claim.
+
+```powershell
+# Offline preview; no connection
+.\.venv-scpi\Scripts\python.exe -m oxygen_engine run-experiment --bindings dispatcher.json --experiment experiments/dc_ac_grid.example.json
+
+# Accelerated no-I/O rehearsal; does not populate OXYGEN's real matrix
+.\.venv-scpi\Scripts\python.exe -m oxygen_engine run-experiment --bindings dispatcher.json --experiment experiments/dc_ac_grid.example.json --memory --execute --confirm-simulated-output
+```
+
+See [commissioning, feedback bindings and expected timeline](docs/efficiency-experiments.md).
+Hardware execution requires fresh measured bus/current/CAN feedback, real source/sink readiness,
+commissioned limits and (for a grid) native Matrix Sampler accepted-count/validity signals.
+Successful writes alone never qualify a grid point. Examples intentionally cannot execute on
+hardware unchanged; the known supply SCPI/property-loss issue must first be resolved.
 
 ## Tests
 
@@ -95,6 +120,10 @@ plan only. `Braking Control` is not active; no brake role or coordinated playbac
 ```
 
 Offline only. Passing tests do not commission hardware.
+
+For SCPI error attribution, raw readback/fault diagnostics and the investigated ladder failure,
+see [SCPI ramp fault investigation](docs/scpi-ramp-fault-investigation.md). A queued error after
+a write does not prove whether the hardware applied it; failed commands are never retried automatically.
 
 ## Safety
 

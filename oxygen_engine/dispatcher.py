@@ -61,6 +61,11 @@ class OutputState:
     verified_at: float | None
     held_by: str | None = None
     status: str = 'readback_verified'
+    last_confirmed_v: float | None = None
+    last_attempted_v: float | None = None
+    attempted_at: float | None = None
+    last_readback_v: float | None = None
+    readback_at: float | None = None
 
 
 class Dispatcher:
@@ -85,11 +90,21 @@ class Dispatcher:
             # Fail closed early if closed_loop was selected without a controller.
             require_controller()
 
+    def output_records(self):
+        return {role: {**vars(state), 'value_basis': 'constant_property_setpoint_readback',
+                       'physical_voltage_established': False}
+                for role, state in self.states.items()}
+
     def snapshot(self, event='output_states'):
+        state = 'running' if self.active_profile else ('ready' if self.prepared else 'not_prepared')
+        if event == 'profile_interrupted_state':
+            state = 'interrupted'
+        elif event == 'termination_output_state':
+            state = 'stopped_unknown' if any(s.status == 'unknown' for s in self.states.values()) else 'stopped'
         self.emit({'event': event, 'simulated': not self.physical, 'active_profile': self.active_profile,
-                   'dispatcher_state': 'running' if self.active_profile else ('ready' if self.prepared else 'not_prepared'),
+                   'dispatcher_state': state,
                    'active_role': self.active_role, 'control_mode': self.config.mode,
-                   'outputs': {role: vars(state).copy() for role, state in self.states.items()}})
+                   'outputs': self.output_records()})
 
     def context(self, role):
         spec = self.outputs[role]
@@ -117,16 +132,27 @@ class Dispatcher:
         return key
 
     def verify(self, role, expected=None):
-        key = self.context(role)
-        actual = number(self.backend.read_output(key), f'{role} readback',
-                        self.outputs[role]['min_aout_v'], self.outputs[role]['max_aout_v'])
+        state = self.states[role]
         if expected is None:
-            expected = self.states[role].value
-        if expected is None or not math.isclose(actual, expected, abs_tol=1e-6, rel_tol=0):
-            self.states[role].status = 'unknown'
-            raise ControlError(f'{role}: expected {expected}, read back {actual}')
-        self.states[role].verified_at = self.clock()
-        self.states[role].status = 'readback_verified'
+            expected = state.value
+        try:
+            key = self.context(role)
+            actual = number(self.backend.read_output(key), f'{role} readback',
+                            self.outputs[role]['min_aout_v'], self.outputs[role]['max_aout_v'])
+            state.last_readback_v, state.readback_at = actual, self.clock()
+            if expected is None or not math.isclose(actual, expected, abs_tol=1e-6, rel_tol=0):
+                raise ControlError(f'{role}: expected {expected}, read back {actual}')
+        except Exception as exc:
+            state.status = 'unknown'
+            self.emit({'event': 'output_verification_failed', 'output': role, 'expected_v': expected,
+                       'last_confirmed_v': state.last_confirmed_v, 'last_confirmed_at': state.verified_at,
+                       'last_attempted_v': state.last_attempted_v, 'last_readback_v': state.last_readback_v,
+                       'readback_at': state.readback_at, 'error_type': type(exc).__name__, 'error': str(exc),
+                       'physical_voltage_established': False})
+            raise
+        state.verified_at = self.clock()
+        state.status = 'readback_verified'
+        state.last_confirmed_v = actual
         return actual
 
     def prepare(self):
@@ -149,7 +175,9 @@ class Dispatcher:
         for role, actual in readings.items():
             spec = self.outputs[role]
             self.backend.authorize(role, spec['binding'], spec)
-            self.states[role] = OutputState(actual, self.clock(), 'adopted_actual_readback' if actual else None)
+            now = self.clock()
+            self.states[role] = OutputState(actual, now, 'adopted_actual_readback' if actual else None,
+                                            last_confirmed_v=actual, last_readback_v=actual, readback_at=now)
         self.prepared = True
         self.snapshot('startup_actual_readback_no_state_restoration')
         if self.open_loop:
@@ -311,17 +339,32 @@ class Dispatcher:
                            spec['min_aout_v'], spec['max_aout_v'])
         # Open-loop: never query telemetry on the AOUT write path.
         self.context(role)
+        state = self.states[role]
+        state.last_attempted_v, state.attempted_at = value, self.clock()
         self.emit({'event': 'write_attempt', 'simulated': not self.physical, 'output': role,
-                   'requested_v': value, 'owner': self.active_profile, 'control_mode': self.config.mode})
-        self.backend.write(role, value)
-        self.verify(role, value)
+                   'requested_v': value, 'last_confirmed_v': state.last_confirmed_v,
+                   'owner': self.active_profile, 'control_mode': self.config.mode})
+        stage = 'backend_write_and_error_queue'
+        try:
+            self.backend.write(role, value)
+            stage = 'readback_verification'
+            actual = self.verify(role, value)
+        except BaseException as exc:
+            state.status = 'unknown'
+            self.emit({'event': 'output_command_failed', 'output': role, 'owner': self.active_profile,
+                       'stage': stage, 'attempted_v': value, 'last_confirmed_v': state.last_confirmed_v,
+                       'last_confirmed_at': state.verified_at, 'last_readback_v': state.last_readback_v,
+                       'error_type': type(exc).__name__, 'error': str(exc),
+                       'physical_voltage_established': False, 'retry_attempted': False})
+            raise
         self.states[role].value = value
         # Supply hold_final persists demand; motor returns to neutral when commanded there.
         if role == SUPPLY:
             self.states[role].held_by = self.active_profile
         else:
             self.states[role].held_by = None if value == spec.get('neutral_aout_v', 0) else self.active_profile
-        self.emit({'event': 'setpoint_ack', 'simulated': not self.physical, 'output': role, 'readback_v': value})
+        self.emit({'event': 'setpoint_ack', 'simulated': not self.physical, 'output': role,
+                   'requested_v': value, 'readback_v': actual, 'physical_voltage_established': False})
 
     def compile(self, profile):
         value, elapsed = self.states[profile.output].value, 0.0
@@ -569,7 +612,7 @@ class Dispatcher:
                    'status': status, 'started_cycles': self.started, 'completed_cycles': self.completed,
                    'physical_actuation': self.physical and getattr(self.backend, 'writes_attempted', 0) > 0,
                    'supply_output_enable_controlled': False,
-                   'output_states': {role: vars(state).copy() for role, state in self.states.items()},
+                   'output_states': self.output_records(),
                    'physical_bus_state': 'not established by open_loop/simulation'
                    if self.open_loop or not self.physical else 'not inferred from AOUT setpoints'})
         return code
@@ -642,7 +685,8 @@ def run_dispatch_cli(args):
             try:
                 handler.emit(logging.LogRecord('dispatcher', logging.INFO, '', 0, line, (), None))
                 if record['event'] not in {'query', 'trigger_sample', 'independent_feedback',
-                                           'setpoint_ack', 'write_attempt'}:
+                                           'setpoint_ack', 'write_attempt',
+                                           'scpi_command_started', 'scpi_command_completed'}:
                     print(line, flush=True)
             except OSError:
                 failed = True
@@ -654,7 +698,10 @@ def run_dispatch_cli(args):
             backend = OxygenBackend(config, emit, confirmed_outputs=confirmed, live=args.live)
         else:
             backend = MemoryBackend(config, events=events)
-        code = Dispatcher(config, backend, emit).run()
+        from .output_lease import output_lease
+
+        with output_lease(config):
+            code = Dispatcher(config, backend, emit).run()
         if failed:
             print('Logging failed; execution stopped. Inspect termination state.', file=sys.stderr)
             return 1

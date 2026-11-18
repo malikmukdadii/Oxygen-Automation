@@ -2,6 +2,10 @@
 
 ## Scope
 
+The two-output supply/drive sequencing milestone is now implemented separately by
+`run-experiment`; see `efficiency-experiments.md`. It does not activate ADC2/Braking Control.
+The three-output drive/brake coordination described below remains design-only.
+
 This is a commissioning/design checklist, not an executable profile or implemented capability.
 Preserve schema-3 `dispatcher.json`, existing per-output profiles and the working open-loop
 engine. Do not add a competing dispatcher/backend or repurpose drive neutral as a brake command.

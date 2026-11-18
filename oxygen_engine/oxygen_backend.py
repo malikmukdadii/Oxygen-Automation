@@ -13,7 +13,7 @@ from .aout_discovery import AoutDiscovery
 from .constant_pattern import finite_number
 from .errors import AuthorizationError, ControlError, InterlockError
 from .schema import ABSOLUTE_AOUT_MAX_V, number
-from .scpi_transport import ScpiProtocolError, ScpiTransport, parse_scpi, quote_scpi
+from .scpi_transport import ScpiCommandError, ScpiProtocolError, ScpiTransport, parse_scpi, quote_scpi
 
 
 @dataclass(frozen=True)
@@ -36,9 +36,12 @@ class OxygenTransport(ScpiTransport):
         self.bindings = {}
         self.capabilities = {}
         self.numeric_name = None
+        self.experiment_numeric_names = ()
         self.invalid = False
         # When True, query/write failures from optional telemetry must not kill AOUT bindings.
         self.soft_telemetry = False
+        self.last_command_id = 0
+        self._command_context = None
 
     def close(self):
         self.capabilities.clear()
@@ -46,6 +49,7 @@ class OxygenTransport(ScpiTransport):
         self.read_ids.clear()
         self.do_ids.clear()
         self.numeric_name = None
+        self.experiment_numeric_names = ()
         self.soft_telemetry = False
         super().close()
 
@@ -60,7 +64,7 @@ class OxygenTransport(ScpiTransport):
             allowed = allowed or command == ':ACQUisition:STATe?'
         allowed = allowed or any(command == f':CHANNELlist:ITEM{cid}:ATTR:NAMes?' for cid in self.read_ids)
         allowed = allowed or (
-            self.numeric_name is not None and command in {':NUMeric:NORMal:DIMS?', ':NUMeric:NORMal:VALue?'})
+            (self.numeric_name is not None or self.experiment_numeric_names) and command in {':NUMeric:NORMal:DIMS?', ':NUMeric:NORMal:VALue?'})
         prefix = ':CHANNELlist:PROPerty? '
         if command.startswith(prefix):
             args = parse_scpi(command[len(prefix):])
@@ -70,6 +74,10 @@ class OxygenTransport(ScpiTransport):
             raise ScpiProtocolError(f'Query refused: {command!r}')
         started = time.monotonic()
         record = {'event': 'query', 'backend': 'oxygen_scpi', 'command': command, 'physical': self.physical}
+        if self._command_context is not None:
+            if command == 'SYST:ERR?':
+                self._command_context['command_phase'] = 'error_queue_query'
+            record.update(self._command_context)
         try:
             reply = super().query(command)
             if command == ':CHANNELlist:NAMes?':
@@ -77,7 +85,9 @@ class OxygenTransport(ScpiTransport):
                 self.read_ids = {entry[0] for entry in entries if isinstance(entry, tuple) and len(entry) == 2}
             record['raw_payload'] = reply
             return reply
-        except BaseException:
+        except BaseException as exc:
+            record.update(error_type=type(exc).__name__, error=str(exc),
+                          raw_payload=getattr(exc, 'raw_response', None))
             if self.physical and not self.soft_telemetry:
                 self.invalid = True
                 self.capabilities.clear()
@@ -85,6 +95,35 @@ class OxygenTransport(ScpiTransport):
         finally:
             record['latency_ms'] = (time.monotonic() - started) * 1000
             self.emit(record)
+
+    def command(self, command, query_error=True):
+        with self._lock:
+            self.last_command_id += 1
+            previous = self._command_context
+            context = {'scpi_command_id': self.last_command_id, 'associated_command': command,
+                       'command_phase': 'dispatch', 'socket_send_completed': False,
+                       'queue_association': 'next queue entry after serialized write; device causality unproven'}
+            self._command_context = context
+            started = time.monotonic()
+            try:
+                self.emit({'event': 'scpi_command_started', **context, 'physical': self.physical})
+                result = super().command(command, query_error=query_error)
+                self.emit({'event': 'scpi_command_completed', **context,
+                           'elapsed_ms': (time.monotonic() - started) * 1000,
+                           'query_error': query_error, 'output_readback_confirmed': False})
+                return result
+            except BaseException as exc:
+                record = {'event': 'scpi_command_failed', **context,
+                          'elapsed_ms': (time.monotonic() - started) * 1000,
+                          'error_type': type(exc).__name__, 'error': str(exc),
+                          'device_write_outcome': 'unknown', 'retry_attempted': False}
+                if isinstance(exc, ScpiCommandError):
+                    record.update(error_code=exc.entry.code, error_message=exc.entry.message,
+                                  raw_error_reply=exc.entry.raw_response)
+                self.emit(record)
+                raise
+            finally:
+                self._command_context = previous
 
     def bind_outputs(self, reports, outputs):
         if not self.connected or self.bindings or self.capabilities or set(reports) != set(outputs):
@@ -129,6 +168,9 @@ class OxygenTransport(ScpiTransport):
                 ':NUMeric:NORMal:FORMat ASCII',
                 ':NUMeric:NORMal:NUMber ALL',
             }
+        if self.experiment_numeric_names:
+            numeric |= {':NUMeric:NORMal:ITEMS ' + ','.join(quote_scpi(n) for n in self.experiment_numeric_names),
+                        ':NUMeric:NORMal:FORMat ASCII', ':NUMeric:NORMal:NUMber ALL'}
         if command not in numeric:
             prefix = ':CHANNELlist:PROPerty '
             if not command.startswith(prefix):
@@ -142,7 +184,11 @@ class OxygenTransport(ScpiTransport):
             if bounds is None or not bounds[0] <= value <= bounds[1] or command != canonical:
                 raise ScpiProtocolError('Output is unauthorized, noncanonical or out of bounds')
         try:
+            if self._command_context is not None:
+                self._command_context['command_phase'] = 'socket_send'
             super().write(command)
+            if self._command_context is not None:
+                self._command_context['socket_send_completed'] = True
         except BaseException:
             if self.physical and not self.soft_telemetry:
                 self.invalid = True
@@ -322,11 +368,32 @@ class OxygenBackend:
             if len(roles) != 1:
                 raise ScpiProtocolError('Unknown output binding')
             role = roles[0]
-            value = self.adapter.get_property_value(self.channel_ids[role], self.constant_property(role))
-            if value.kind != 'SCALAR' or len(value.values) != 2 or value.values[1] != 'V':
-                raise ScpiProtocolError('Constant readback must be SCALAR in V')
-            self.error()
-            return finite_number(value.values[0], 'constant readback')
+            cid, prop = self.channel_ids[role], self.constant_property(role)
+            raw, value = None, None
+            stage = 'property_query'
+            try:
+                raw = self.adapter.get_property_reply(cid, prop)
+                stage = 'property_parse'
+                value = self.adapter.parse_property_value(raw)
+                stage = 'type_and_unit_validation'
+                if value.kind != 'SCALAR' or len(value.values) != 2 or value.values[1] != 'V':
+                    raise ScpiProtocolError(f'Constant readback must be SCALAR in V: raw={raw!r}, kind={value.kind}')
+                stage = 'error_queue_check'
+                self.error()
+                stage = 'finite_value_validation'
+                return finite_number(value.values[0], 'constant readback')
+            except Exception as exc:
+                self.emit({'event': 'output_readback_failed', 'output': role, 'stage': stage,
+                           'channel': self.config.raw['outputs'][role]['channel'],
+                           'channel_id': cid, 'property': prop,
+                           'query_command': f':CHANNELlist:PROPerty? {quote_scpi(cid)},{quote_scpi(prop)}',
+                           'raw_readback': raw if raw is not None else getattr(exc, 'raw_response', None),
+                           'parsed_kind': value.kind if value is not None else None,
+                           'parsed_values_repr': repr(value.values) if value is not None else None,
+                           'error_type': type(exc).__name__, 'error': str(exc),
+                           'last_scpi_command_id': self.transport.last_command_id,
+                           'physical_voltage_established': False})
+                raise
 
     def write(self, role, value):
         with self.lock:
@@ -344,9 +411,18 @@ class OxygenBackend:
                     raise AuthorizationError(
                         'Physical write refused: fresh real supply_external_ready is required')
             self.writes_attempted += 1
-            self.transport.command(
-                f':CHANNELlist:PROPerty {quote_scpi(self.channel_id(role))},'
-                f'{quote_scpi(self.constant_property(role))},SCALAR,{value:.9g},"V"')
+            command = (f':CHANNELlist:PROPerty {quote_scpi(self.channel_id(role))},'
+                       f'{quote_scpi(self.constant_property(role))},SCALAR,{value:.9g},"V"')
+            try:
+                self.transport.command(command)
+            except Exception as exc:
+                self.emit({'event': 'aout_write_failed', 'output': role, 'channel': spec['channel'],
+                           'channel_id': self.channel_id(role), 'property': self.constant_property(role),
+                           'command': command, 'requested_v': value, 'wire_requested_v': float(f'{value:.9g}'),
+                           'scpi_command_id': self.transport.last_command_id,
+                           'error_type': type(exc).__name__, 'error': str(exc),
+                           'device_write_outcome': 'unknown', 'retry_attempted': False})
+                raise
 
     def _boolean(self, cid, prop):
         value = self.adapter.get_property_value(cid, prop)

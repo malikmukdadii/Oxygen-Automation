@@ -91,6 +91,15 @@ def build_parser() -> argparse.ArgumentParser:
     dispatcher.add_argument('--confirm-physical-output', action='append', default=[], metavar='EXACT_CHANNEL_NAME',
                             help=argparse.SUPPRESS)
 
+    experiment = sub.add_parser('run-experiment', help='Preview or run a serialized two-output experiment')
+    experiment.add_argument('--bindings', default=str(_default_dispatcher_path()))
+    experiment.add_argument('--experiment', required=True, help='Experiment plan JSON; V3 bindings remain separate')
+    experiment.add_argument('--execute', action='store_true')
+    experiment.add_argument('--memory', action='store_true', help='No-I/O accelerated rehearsal retaining configured clamps')
+    experiment.add_argument('--confirm-simulated-output', action='store_true')
+    experiment.add_argument('--confirm-output', action='append', default=[])
+    experiment.add_argument('--log-file')
+
     aout_discovery = sub.add_parser(
         'discover-aout',
         help='Read-only discovery/validation of configured AOUT roles from a V3 dispatcher JSON',
@@ -109,6 +118,12 @@ def cmd_dispatch_patterns(args: argparse.Namespace) -> int:
     from .dispatcher import run_dispatch_cli
 
     return run_dispatch_cli(args)
+
+
+def cmd_run_experiment(args: argparse.Namespace) -> int:
+    from .experiment_cli import run_experiment_cli
+
+    return run_experiment_cli(args)
 
 
 def cmd_discover_aout(args: argparse.Namespace) -> int:
@@ -216,6 +231,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(_normalize_argv(argv))
     handlers = {
+        'run-experiment': cmd_run_experiment,
         'discover-aout': cmd_discover_aout,
         'dispatch-patterns': cmd_dispatch_patterns,
         'watch-do': cmd_watch_do,

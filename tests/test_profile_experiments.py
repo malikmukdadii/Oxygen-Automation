@@ -220,3 +220,33 @@ def test_busy_pulse_is_unobservable_and_not_queued(tmp_path):
     assert any(r['event'] == 'profile_started' and r['button_polling'] == 'paused' for r in records)
     assert not any(r['event'] == 'trigger_state' and r['assignment'] == 'motor_gentle'
                    and r['edge'] == 'rising' for r in records)
+
+
+def test_ramp_enable_left_high_does_not_compete_with_characterization(tmp_path):
+    raw = memory_raw()
+    ramp, ladder = raw['assignments'][0], raw['assignments'][2]
+    ramp['trigger'] = 'Ramp Enable'
+    ladder.update(name='rzxa_char_ladder', trigger='RZXA Char',
+                  profile=str(ROOT / 'profiles/rzxa_36_38_40_ladder.json'))
+    raw['assignments'] = [ramp, ladder]
+    events = [{'at_s': .1, 'buttons': {'Ramp Enable': True}},
+              {'at_s': 10.8, 'buttons': {'RZXA Char': True}},
+              {'at_s': 10.9, 'buttons': {'RZXA Char': False}},
+              {'at_s': 35, 'stop': True}]
+    dispatcher, backend, _, records = setup_dispatcher(tmp_path, raw, events=events)
+    assert dispatcher.run() == 0
+    assert backend.buttons['Ramp Enable'] is True
+    assert dispatcher.started == dispatcher.completed == 2
+    assert [r['assignment'] for r in records if r['event'] == 'profile_started'] == [
+        'rzxa_to_40_hold', 'rzxa_char_ladder']
+    first_complete = next(i for i, r in enumerate(records) if r['event'] == 'pattern_cycle_complete')
+    ladder_start = next(i for i, r in enumerate(records) if r['event'] == 'profile_started'
+                        and r['assignment'] == 'rzxa_char_ladder')
+    assert first_complete < ladder_start
+    acquired = [r for r in records if r['event'] == 'profile_ownership_acquired']
+    assert acquired[1]['outputs'][SUPPLY]['value'] == .5
+    writes = [r for r in records[ladder_start:] if r['event'] == 'write_attempt' and r['output'] == SUPPLY]
+    assert writes and all(r['owner'] == 'rzxa_36_38_40_ladder' for r in writes)
+    assert dispatcher.states[SUPPLY].value == .5
+    assert records[-2]['event'] == 'termination_output_state'
+    assert records[-2]['dispatcher_state'] == 'stopped'
