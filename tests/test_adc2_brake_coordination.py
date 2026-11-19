@@ -74,8 +74,10 @@ def test_ces_eight_button_loads_with_braking_control_fixture():
     assert fixture['name'] == 'Braking Control'
     assert {a['trigger'] for a in config.raw['assignments'] if a.get('enabled', True)} == {
         'Ramp Enable', 'Ramp Disable', 'Motor Gentle', 'Run Regen Test', 'Run Driving Cycle',
-        'Run Efficiency Scan', 'RZXA Voltage Down', 'RZXA Voltage Up',
+        'Run Efficiency Scan', 'RZ-XA Step Down', 'RZ-XA Step Up',
     }
+    assert config.raw['outputs'][MOTOR]['max_aout_v'] == 1.6
+    assert config.raw['outputs'][MOTOR]['higher_drive_limit_authorized'] is True
 
 
 def test_physical_brake_authorization_rejected(tmp_path):
@@ -150,7 +152,8 @@ def test_regen_test_coordinates_drive_then_brake(tmp_path):
     dispatcher.execute_profile('regen_test')
     roles_written = [role for _, role, _ in backend.commands]
     assert MOTOR in roles_written and BRAKE in roles_written
-    # Never command brake while drive demand is non-zero: reconstruct ordered states.
+    assert ('write', MOTOR, 1.6) in backend.commands
+    # Never command brake demand while drive demand is non-zero.
     drive = brake = 0.0
     for _, role, value in backend.commands:
         if role == MOTOR:
@@ -161,7 +164,7 @@ def test_regen_test_coordinates_drive_then_brake(tmp_path):
     assert dispatcher.states[MOTOR].value == 0
     assert dispatcher.states[BRAKE].value == 0
     names = [r['name'] for r in records if r['event'] == 'checkpoint']
-    assert 'brake_trial_begin' in names and 'coast_comparison_complete' in names
+    assert 'trial_b_regen_brake_prompt_begin' in names and 'trial_b_regen_complete' in names
 
 
 def test_driving_cycle_releases_brake_before_second_accel(tmp_path):
@@ -169,11 +172,11 @@ def test_driving_cycle_releases_brake_before_second_accel(tmp_path):
     _prepare_with_supply(dispatcher, backend)
     dispatcher.execute_profile('driving_cycle')
     drive = brake = 0.0
-    saw_second_accel = False
+    saw_high_accel = False
     for _, role, value in backend.commands:
         if role == MOTOR:
-            if value > 0.3:
-                saw_second_accel = True
+            if value >= 1.0:
+                saw_high_accel = True
                 assert brake == 0
             drive = value
         elif role == BRAKE:
@@ -181,7 +184,8 @@ def test_driving_cycle_releases_brake_before_second_accel(tmp_path):
             # Release-level brake writes may occur while drive is active; demand must not.
             if value > 1e-9:
                 assert drive == 0
-    assert saw_second_accel
+    assert saw_high_accel
+    assert ('write', MOTOR, 1.6) in backend.commands
     assert dispatcher.states[BRAKE].value == 0
 
 
@@ -244,3 +248,34 @@ def test_cleanup_releases_brake(tmp_path):
     assert dispatcher.cleanup()
     assert dispatcher.states[BRAKE].value == 0
     assert any(r['event'] == 'brake_release_verified' for r in records)
+
+
+def test_production_coordinated_timeline_runs_without_boundary_injection(tmp_path):
+    """Exercise the stock multi-timeline path (not only virtual-clock boundary injection)."""
+    raw = json.loads(CES.read_text(encoding='utf-8-sig'))
+    for assignment in raw['assignments']:
+        assignment['profile'] = str((CES.parent / Path(assignment['profile'])).resolve())
+    # Keep only a short coordinated profile for wall-clock duration.
+    raw['assignments'] = [{
+        'name': 'regen_test',
+        'trigger': 'Run Regen Test',
+        'output': 'vesc_throttle',
+        'profile': str((ROOT / 'profiles/ces/motor_regen_trial_b.json').resolve()),
+    }]
+    path = tmp_path / 'prod-timeline.json'
+    path.write_text(json.dumps(raw), encoding='utf-8')
+    config = load_dispatcher_config(path)
+    clock, records = Clock(), []
+    backend = MemoryBackend(config, clock=clock)
+    # Default timeline=execute_timeline; Dispatcher._run_multi_timeline uses the local multi path.
+    dispatcher = Dispatcher(config, backend, records.append, clock=clock, wait=clock.wait)
+    backend.connect()
+    dispatcher.prepare()
+    dispatcher.command(SUPPLY, 0.5)
+    dispatcher.execute_profile('regen_test')
+    assert ('write', MOTOR, 1.6) in backend.commands
+    assert ('write', BRAKE, 0.2) in backend.commands
+    assert dispatcher.states[MOTOR].value == 0
+    assert dispatcher.states[BRAKE].value == 0
+    assert any(r['event'] == 'coordinated_partial_update_failed' for r in records) is False
+    assert dispatcher.completed == 1

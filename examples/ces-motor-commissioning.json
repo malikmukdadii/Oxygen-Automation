@@ -4,6 +4,7 @@
   "transport": "memory",
   "live_control": {
     "enable_physical_aout": false,
+    "enable_physical_brake": false,
     "enable_rzxa_output_toggle": false,
     "enable_real_rzxa_scpi": false,
     "require_explicit_hardware_authorization": true
@@ -41,7 +42,7 @@
     "vesc_throttle": {
       "role": "motor_throttle",
       "channel": null,
-      "display_name": "FAKE CES current-demand candidate; 0 V normal stop is NOT a fault-safety approval; 1.00 V ceiling is rehearsal only",
+      "display_name": "Drive Control FAKE; ADC1 upper command 1.60 V authorized after manual secured-BLDC test; 0 V is normal stop not fault-safety approval",
       "expected_id": null,
       "channel_discovery_required": true,
       "binding": "motor_throttle_fixture",
@@ -50,8 +51,8 @@
       "source": "CONST0",
       "const_property": "TRION/SourceChannel_A_CONST/Const0",
       "min_aout_v": 0.0,
-      "max_aout_v": 1.0,
-      "commissioned_drive_limit_v": 1.0,
+      "max_aout_v": 1.6,
+      "commissioned_drive_limit_v": 1.6,
       "higher_drive_limit_authorized": true,
       "neutral_aout_v": 0.0,
       "neutral_verified": false,
@@ -60,6 +61,28 @@
       "on_cancel": "return_neutral",
       "on_fault": "return_neutral",
       "on_shutdown": "return_neutral"
+    },
+    "vesc_brake": {
+      "role": "motor_brake",
+      "channel": null,
+      "display_name": "Braking Control FAKE; release 0 V; provisional offline brake demand; live ADC2 fail-closed",
+      "expected_id": null,
+      "channel_discovery_required": true,
+      "binding": "motor_brake_fixture",
+      "authorization": {"simulation": true, "physical": false},
+      "mode": "ConstOutput",
+      "source": "CONST0",
+      "const_property": "TRION/SourceChannel_A_CONST/Const0",
+      "min_aout_v": 0.0,
+      "max_aout_v": 0.4,
+      "brake_min_aout_v": 0.0,
+      "brake_max_aout_v": 0.4,
+      "brake_release_aout_v": 0.0,
+      "brake_release_verified": false,
+      "completion_policy": "return_release",
+      "on_cancel": "return_release",
+      "on_fault": "return_release",
+      "on_shutdown": "return_release"
     }
   },
   "timing": {"poll_ms": 50, "max_trigger_gap_ms": 250, "interval_ms": 100, "max_lateness_ms": 250, "telemetry_poll_ms": 0},
@@ -69,6 +92,9 @@
     "supply_demand_grid_commissioned": false,
     "require_supply_demand_before_motor": true,
     "supply_down_requires_motor_neutral": true,
+    "drive_brake_mutual_exclusion": true,
+    "zero_drive_before_brake": true,
+    "release_brake_before_drive": true,
     "one_active_profile_global": true,
     "external_emergency_stop_required_for_live": true
   },
@@ -78,7 +104,7 @@
     {"name": "rzxa_to_40_hold", "trigger": "Ramp Enable", "output": "rzxa_voltage_demand", "profile": "../profiles/rzxa_ramp_hold.json"},
     {"name": "rzxa_down", "trigger": "Ramp Disable", "output": "rzxa_voltage_demand", "profile": "../profiles/rzxa_ramp_down.json"},
     {"name": "motor_gentle", "trigger": "Motor Gentle", "output": "vesc_throttle", "profile": "../profiles/ces/motor_gentle.json"},
-    {"name": "regen_test", "trigger": "Run Regen Test", "output": "vesc_throttle", "profile": "../profiles/ces/motor_coast_compare.json"},
+    {"name": "regen_test", "trigger": "Run Regen Test", "output": "vesc_throttle", "profile": "../profiles/ces/motor_regen_trial_b.json"},
     {"name": "driving_cycle", "trigger": "Run Driving Cycle", "output": "vesc_throttle", "profile": "../profiles/ces/motor_stop_go.json"},
     {"name": "efficiency_scan", "trigger": "Run Efficiency Scan", "output": "vesc_throttle", "profile": "../profiles/ces/motor_three_level.json"},
     {"name": "rzxa_voltage_down", "trigger": "RZ-XA Step Down", "output": "rzxa_voltage_demand", "profile": "../profiles/rzxa_voltage_down.json"},
@@ -88,14 +114,19 @@
     "namespace": "FAKE_IN_PROCESS_ONLY",
     "outputs": {
       "supply_demand_fixture": {
-        "name": "FAKE supply analog demand", "id": "101",
+        "name": "Takasago Voltage Control", "id": "101",
         "mode": "ConstOutput", "source": "CONST0", "property": "TRION/SourceChannel_A_CONST/Const0",
         "unit": "V", "min_v": 0.0, "max_v": 0.5, "initial_v": 0.5
       },
       "motor_throttle_fixture": {
-        "name": "FAKE motor throttle", "id": "102",
+        "name": "Drive Control", "id": "102",
         "mode": "ConstOutput", "source": "CONST0", "property": "TRION/SourceChannel_A_CONST/Const0",
-        "unit": "V", "min_v": 0.0, "max_v": 1.0, "initial_v": 0.0
+        "unit": "V", "min_v": 0.0, "max_v": 1.6, "initial_v": 0.0
+      },
+      "motor_brake_fixture": {
+        "name": "Braking Control", "id": "103",
+        "mode": "ConstOutput", "source": "CONST0", "property": "TRION/SourceChannel_A_CONST/Const0",
+        "unit": "V", "min_v": 0.0, "max_v": 0.4, "initial_v": 0.0
       }
     },
     "sample_interval_s": 0.1,

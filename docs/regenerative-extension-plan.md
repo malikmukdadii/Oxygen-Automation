@@ -6,67 +6,52 @@ The two-output supply/drive sequencing milestone remains implemented by
 `run-experiment`; see `efficiency-experiments.md`. That path still does not
 command ADC2/Braking Control.
 
-Schema-v3 now optionally hosts a third logical role `vesc_brake` mapped to the
+Schema-v3 optionally hosts a third logical role `vesc_brake` mapped to the
 exact OXYGEN channel `Braking Control`, plus coordinated drive/brake timelines
 on the existing dispatcher. Live physical braking stays fail-closed:
 `live_control.enable_physical_brake` must remain false, and physical
 authorization of `vesc_brake` is rejected until a separate commissioning review
 enables it.
 
-Preserve schema-3 `dispatcher.json`, existing per-output profiles where they
-remain single-role, and the working open-loop engine. Do not add a competing
-dispatcher/backend or repurpose drive neutral as a brake command.
+Preserve schema-3 `dispatcher.json` (local/operator file; do not overwrite via
+automation), existing single-role profiles where applicable, and the working
+open-loop engine. Do not add a competing dispatcher/backend or repurpose drive
+neutral as a brake command.
 
 | Physical OXYGEN name | Terminal | Logical role | Current state |
 |---|---|---|---|
-| Drive Control | AO2/1 | `vesc_throttle` | Active; keep exact name/role |
-| Braking Control | AO2/2 | `vesc_brake` | Offline/memory coordination supported; live writes disabled |
+| Drive Control | AO2/1 | `vesc_throttle` | Active; CES offline peak authorized to **1.60 V** after manual ADC1 test |
+| Braking Control | AO2/2 | `vesc_brake` | Offline/memory coordination; release **0 V**; live writes disabled |
 | Takasago Voltage Control | AO2/3 | `rzxa_voltage_demand` | Active; keep exact name/role |
 
-## Implemented extension within the existing engine
+Operator-confirmed physical motor notes (docs only; do not change VESC limits):
+ADC1 0 V = zero positive drive; ADC2 0 V = brake released; ADC1 > 0 = positive
+current demand (not regulated speed); Motor/Battery ±10 A, Abs max 20 A.
 
-1. `vesc_brake` / `motor_brake` is a first-class schema role with independent
-   `brake_release_aout_v`, `brake_min/max_aout_v`, `brake_release_verified`,
-   discovery/readback, and memory fixtures named exactly `Braking Control`.
-2. Profiles may declare `outputs: ["vesc_throttle", "vesc_brake"]` while keeping
-   a single primary `output` / assignment owner. Existing single-output V3
-   profiles remain valid.
-3. One global ownership lock still serializes SCPI/fixture writes. Coordinated
-   compile builds a shared monotonic schedule with per-role segments; partial
-   update failures are emitted and abort the cycle.
-4. Interlocks: `drive_brake_mutual_exclusion`, `zero_drive_before_brake`,
-   `release_brake_before_drive`. Runtime refuses overlapping drive and brake
-   demand. Drive-only motor profiles verify brake release when the role is
-   configured.
-5. Cleanup attempts motor neutral then brake release; supply demand is still
-   preserved.
-6. CES eight-button names are unchanged. Behind the buttons:
-   - Motor Gentle / Run Efficiency Scan: drive-only + brake-release verify
-   - Run Regen Test (`motor_coast_compare`): coordinated accel → coast → brake
-   - Run Driving Cycle (`motor_stop_go`): accel/coast/brake bursts
+## CES offline waveforms (software)
 
-Offline memory waveforms use provisional brake voltages for rehearsal only.
-They are not commissioned live limits.
+Exact eight-button labels: Ramp Enable, Ramp Disable, Motor Gentle, Run Regen
+Test, Run Driving Cycle, Run Efficiency Scan, **RZ-XA Step Down**, **RZ-XA Step Up**.
 
-## Still required before live braking
+| Button | Profile | Peaks / notes |
+|---|---|---|
+| Motor Gentle | `profiles/ces/motor_gentle.json` | 0.60 V, ~10 s, drive-only |
+| Run Regen Test | Trial B default `motor_regen_trial_b.json` | 1.60 V then prompt ADC2 brake |
+| Run Regen Test (alt) | Trial A `motor_coast_compare.json` | 1.60 V then coast; swap via assignment profile |
+| Run Driving Cycle | `profiles/ces/motor_stop_go.json` | 0.60 / 1.00 / 1.60 V + coast/brake intervals |
+| Run Efficiency Scan | `profiles/ces/motor_three_level.json` | 0.40 / 0.80 / 1.20 / 1.60 V, ~4 s each |
 
-- Verify the exact ADC1/ADC2 app configuration, transfer curves, deadbands,
-  neutral/release and fault levels on this controller/firmware.
-- Confirm mutual exclusion and fault behavior when both ADC inputs are
-  non-neutral, an input is disconnected, CAN is lost, or the SCPI host fails.
-- Verify phase/battery regenerative limits and that the RZ-XA installation can
-  absorb energy independently of AOUT demand.
-- Verify independent e-stop/inhibit and decide release-vs-hold brake policy per
-  fault. Enable `enable_physical_brake` only after that review.
-- Measure signed DC power at the relevant energy boundary; speed reduction alone
-  is not proof of regeneration.
+Coast vs regen: same DOUT; select Trial A or Trial B by changing the assignment
+`profile` path. Open-loop timing does **not** claim matched start RPM; RPM-triggered
+brake remains disabled without sync measurement.
 
-## Staged live experiment (future, after commissioning)
+Brake demand levels are config `brake_max_aout_v` (provisional 0.15/0.20 V in
+profiles). ADC1 testing does **not** authorize ADC2 braking capability.
 
-Use one explicitly coordinated run, not a new DOUT:
+## Still required before live ADC2
 
-- Establish and verify supply with drive neutral and brake released.
-- Ramp drive, hold a measured condition, return drive to neutral and verify.
-- Apply a bounded commissioned brake ramp/hold; measure returned DC energy.
-- Release braking and verify completion states.
-- Only then consider small bus-demand disturbances during a permitted phase.
+- Calibrate ADC2 release/range/fault response independently of ADC1
+- Confirm mutual exclusion and host/CAN/disconnect faults
+- Verify RZ-XA regenerative sinking and DC-link protection
+- Enable `enable_physical_brake` only after that review
+- Measure signed DC power; speed reduction alone is not regen proof

@@ -1,8 +1,9 @@
 {
   "schema_version": 3,
   "name": "ces_motor_gentle_candidate",
-  "description": "MEMORY-ONLY current-control commissioning candidate: ramp from 0 V normal stop demand to 0.60 V positive current demand, hold demand briefly, and ramp to 0 V. Demand is not regulated speed. Normal stopping does not establish a safe fault response or prove regeneration.",
+  "description": "Offline CES Motor Gentle: ADC1 0→0.60 V / 3 s, hold 4 s, return to 0 V / 3 s (~10 s). Drive-only; ADC2/Braking Control must remain at operator-verified 0 V release when configured. Current demand is not regulated speed.",
   "output": "vesc_throttle",
+  "outputs": ["vesc_throttle"],
   "timeout_s": 30,
   "completion": {"mode": "return_neutral", "value": 0.0},
   "requires": {"motor_neutral": true, "motor_enable": "operator_verified"},

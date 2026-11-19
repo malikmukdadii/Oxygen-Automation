@@ -1,25 +1,24 @@
 {
   "schema_version": 3,
-  "name": "ces_motor_regen_candidate",
-  "description": "MEMORY-ONLY current-control commissioning candidate: 0..3 s acceleration-demand window to 1.00 V, 3..7 s constant positive current demand (not constant speed), and 7..18 s deceleration measurement window including a 1 s ramp to 0 V normal stop and 10 s zero-demand observation. No regeneration claim without measured negative DC power and verified sink acceptance. Historical filename retained for assignment traceability.",
+  "name": "ces_motor_regen_coast_trial_a",
+  "description": "Run Regen Test Trial A (coast, unmatched open-loop timing): ADC1 accel to operator-tested 1.60 V peak, return to 0 V, keep ADC2 at 0 V release, observe passive decel. Does not claim matched start RPM without sync measurement; RPM-triggered brake remains disabled. Live ADC2 braking is a separate commissioning workstream.",
   "output": "vesc_throttle",
+  "outputs": ["vesc_throttle"],
   "timeout_s": 40,
   "completion": {"mode": "return_neutral", "value": 0.0},
   "requires": {"motor_neutral": true, "motor_enable": "operator_verified"},
   "steps": [
     {"type": "assert_preconditions", "params": {"motor_neutral": true}},
     {"type": "set_aout", "params": {"channel": "vesc_throttle", "value": 0.0}},
-    {"type": "checkpoint", "params": {"name": "candidate_acceleration_window_begin"}},
-    {"type": "ramp_aout", "params": {"channel": "vesc_throttle", "target": 1.0, "duration_s": 3.0}},
-    {"type": "checkpoint", "params": {"name": "candidate_acceleration_window_end"}},
-    {"type": "checkpoint", "params": {"name": "candidate_current_100_hold_begin"}},
+    {"type": "checkpoint", "params": {"name": "trial_a_coast_accel_begin"}},
+    {"type": "ramp_aout", "params": {"channel": "vesc_throttle", "target": 1.6, "duration_s": 3.0}},
+    {"type": "checkpoint", "params": {"name": "trial_a_coast_hold_160_begin"}},
     {"type": "hold", "params": {"duration_s": 4.0}},
-    {"type": "checkpoint", "params": {"name": "candidate_deceleration_window_begin"}},
+    {"type": "checkpoint", "params": {"name": "trial_a_coast_drive_release_begin"}},
     {"type": "ramp_aout", "params": {"channel": "vesc_throttle", "target": 0.0, "duration_s": 1.0}},
-    {"type": "checkpoint", "params": {"name": "candidate_zero_demand_observation_begin"}},
-    {"type": "hold", "params": {"duration_s": 10.0}},
-    {"type": "checkpoint", "params": {"name": "candidate_deceleration_window_end"}},
     {"type": "return_neutral", "params": {"channel": "vesc_throttle"}},
-    {"type": "checkpoint", "params": {"name": "candidate_regen_complete"}}
+    {"type": "checkpoint", "params": {"name": "trial_a_coast_passive_decel_begin"}},
+    {"type": "hold", "params": {"duration_s": 9.0}},
+    {"type": "checkpoint", "params": {"name": "trial_a_coast_complete"}}
   ]
 }

@@ -4,6 +4,7 @@
   "transport": "memory",
   "live_control": {
     "enable_physical_aout": false,
+    "enable_physical_brake": false,
     "enable_rzxa_output_toggle": false,
     "enable_real_rzxa_scpi": false,
     "require_explicit_hardware_authorization": true
@@ -41,7 +42,7 @@
     "vesc_throttle": {
       "role": "motor_throttle",
       "channel": null,
-      "display_name": "Drive Control (memory fixture only)",
+      "display_name": "Drive Control (memory fixture; ADC1 upper command authorized to 1.60 V after manual test)",
       "expected_id": null,
       "channel_discovery_required": true,
       "binding": "motor_throttle_fixture",
@@ -50,7 +51,9 @@
       "source": "CONST0",
       "const_property": "TRION/SourceChannel_A_CONST/Const0",
       "min_aout_v": 0.0,
-      "max_aout_v": 0.4,
+      "max_aout_v": 1.6,
+      "commissioned_drive_limit_v": 1.6,
+      "higher_drive_limit_authorized": true,
       "neutral_aout_v": 0.0,
       "neutral_verified": false,
       "mapping_verified": false,
@@ -62,7 +65,7 @@
     "vesc_brake": {
       "role": "motor_brake",
       "channel": null,
-      "display_name": "Braking Control (memory fixture only)",
+      "display_name": "Braking Control (memory fixture; release 0 V; provisional sim brake demand only)",
       "expected_id": null,
       "channel_discovery_required": true,
       "binding": "motor_brake_fixture",
@@ -100,12 +103,12 @@
   "assignments": [
     {"name": "rzxa_to_40_hold", "trigger": "Ramp Enable", "output": "rzxa_voltage_demand", "profile": "../profiles/rzxa_ramp_hold.json"},
     {"name": "rzxa_down", "trigger": "Ramp Disable", "output": "rzxa_voltage_demand", "profile": "../profiles/rzxa_ramp_down.json"},
-    {"name": "motor_gentle", "trigger": "Motor Gentle", "output": "vesc_throttle", "profile": "../profiles/motor_gentle.json"},
-    {"name": "regen_test", "trigger": "Run Regen Test", "output": "vesc_throttle", "profile": "../profiles/motor_coast_compare.json"},
-    {"name": "driving_cycle", "trigger": "Run Driving Cycle", "output": "vesc_throttle", "profile": "../profiles/motor_stop_go.json"},
-    {"name": "efficiency_scan", "trigger": "Run Efficiency Scan", "output": "vesc_throttle", "profile": "../profiles/motor_three_level.json"},
-    {"name": "rzxa_voltage_down", "trigger": "RZXA Voltage Down", "output": "rzxa_voltage_demand", "profile": "../profiles/rzxa_voltage_down.json"},
-    {"name": "rzxa_voltage_up", "trigger": "RZXA Voltage Up", "output": "rzxa_voltage_demand", "profile": "../profiles/rzxa_voltage_up.json"}
+    {"name": "motor_gentle", "trigger": "Motor Gentle", "output": "vesc_throttle", "profile": "../profiles/ces/motor_gentle.json"},
+    {"name": "regen_test", "trigger": "Run Regen Test", "output": "vesc_throttle", "profile": "../profiles/ces/motor_regen_trial_b.json"},
+    {"name": "driving_cycle", "trigger": "Run Driving Cycle", "output": "vesc_throttle", "profile": "../profiles/ces/motor_stop_go.json"},
+    {"name": "efficiency_scan", "trigger": "Run Efficiency Scan", "output": "vesc_throttle", "profile": "../profiles/ces/motor_three_level.json"},
+    {"name": "rzxa_voltage_down", "trigger": "RZ-XA Step Down", "output": "rzxa_voltage_demand", "profile": "../profiles/rzxa_voltage_down.json"},
+    {"name": "rzxa_voltage_up", "trigger": "RZ-XA Step Up", "output": "rzxa_voltage_demand", "profile": "../profiles/rzxa_voltage_up.json"}
   ],
   "simulation": {
     "namespace": "FAKE_IN_PROCESS_ONLY",
@@ -118,7 +121,7 @@
       "motor_throttle_fixture": {
         "name": "Drive Control", "id": "102",
         "mode": "ConstOutput", "source": "CONST0", "property": "TRION/SourceChannel_A_CONST/Const0",
-        "unit": "V", "min_v": 0.0, "max_v": 0.4, "initial_v": 0.0
+        "unit": "V", "min_v": 0.0, "max_v": 1.6, "initial_v": 0.0
       },
       "motor_brake_fixture": {
         "name": "Braking Control", "id": "103",
