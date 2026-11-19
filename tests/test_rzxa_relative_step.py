@@ -156,10 +156,11 @@ def test_motor_neutral_always_required_even_if_legacy_guard_disabled(tmp_path, d
 @pytest.mark.parametrize('profile', ['motor_gentle', 'regen_test', 'driving_cycle', 'efficiency_scan'])
 def test_motor_profiles_authorized_only_at_verified_discrete_demands(tmp_path, start, profile):
     dispatcher, backend, _, _ = make(tmp_path, start)
+    ceiling = dispatcher.config.raw['outputs'][MOTOR]['max_aout_v']
     dispatcher.execute_profile(profile)
     assert dispatcher.completed == 1
     assert dispatcher.states[MOTOR].value == 0
-    assert all(value <= .4 for _, role, value in backend.commands if role == MOTOR)
+    assert all(value <= ceiling for _, role, value in backend.commands if role == MOTOR)
 
 
 @pytest.mark.parametrize('start', [0, .2, .449, .451, .499])

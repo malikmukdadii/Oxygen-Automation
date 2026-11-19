@@ -1,4 +1,4 @@
-"""Unified dual-AOUT dispatcher: open-loop by default, closed-loop only with a real controller."""
+"""Unified multi-AOUT dispatcher: open-loop by default, closed-loop only with a real controller."""
 
 from __future__ import annotations
 
@@ -15,13 +15,14 @@ from pathlib import Path
 from .closed_loop import require_controller
 from .constant_pattern import execute_timeline, finite_number
 from .do_monitor import DiagnosticEdgeTracker
-from .errors import ControlError, ControlNotReady, InterlockError
+from .errors import AuthorizationError, ControlError, ControlNotReady, InterlockError
 from .memory_backend import MemoryBackend, SimulationFinished, load_scenario
-from .pattern_segments import OutputPattern, Segment, StrictRotatingHandler
-from .schema import SUPPLY_DEMAND_GRID, number
+from .pattern_segments import MultiOutputPattern, OutputPattern, Segment, StrictRotatingHandler
+from .schema import BRAKE, MOTOR, SUPPLY, SUPPLY_DEMAND_GRID, number
 
-SUPPLY = 'rzxa_voltage_demand'
-MOTOR = 'vesc_throttle'
+SUPPLY = SUPPLY
+MOTOR = MOTOR
+BRAKE = BRAKE
 
 
 def configuration_summary(config):
@@ -78,9 +79,11 @@ class Dispatcher:
         self.physical = config.physical
         self.has_supply = config.has_supply
         self.has_motor = config.has_motor
+        self.has_brake = config.has_brake
         self.states = {}
         self.active_profile = None
         self.active_role = None
+        self.active_roles = ()
         self.prepared = False
         self.started = 0
         self.completed = 0
@@ -171,6 +174,8 @@ class Dispatcher:
             actual = number(self.backend.read_output(key), 'startup readback', spec['min_aout_v'], spec['max_aout_v'])
             if role == MOTOR and actual != spec['neutral_aout_v']:
                 raise ControlError('Startup motor is not neutral; refusing all writes')
+            if role == BRAKE and actual != spec['brake_release_aout_v']:
+                raise ControlError('Startup brake is not at release; refusing all writes')
             readings[role] = actual
         for role, actual in readings.items():
             spec = self.outputs[role]
@@ -262,9 +267,16 @@ class Dispatcher:
             raise InterlockError('motor_neutral prerequisite requires an active vesc_throttle role')
         self.verify(MOTOR, self.outputs[MOTOR]['neutral_aout_v'])
 
+    def brake_released(self):
+        if not self.has_brake:
+            raise InterlockError('brake_released prerequisite requires an active vesc_brake role')
+        self.verify(BRAKE, self.outputs[BRAKE]['brake_release_aout_v'])
+
     def regen_safe(self):
         if self.has_motor:
             self.motor_neutral()
+        if self.has_brake:
+            self.brake_released()
         if self.open_loop:
             return
         self.require_true('regen_safe')
@@ -302,16 +314,23 @@ class Dispatcher:
                 requested.update(step['params'])
         wants_motor_neutral = bool(
             requested.get('motor_neutral') or profile.requires.get('motor_neutral'))
+        wants_brake_released = bool(
+            requested.get('brake_released') or profile.requires.get('brake_released'))
         if profile.output == MOTOR:
             if self.has_motor:
                 self.motor_neutral()
             self.motor_interlocks(profile)
+            # Drive-only and coordinated motor profiles verify ADC2 release when configured.
+            if self.has_brake:
+                self.brake_released()
         elif wants_motor_neutral:
             # Explicit cross-role prerequisite — never silently skipped.
             self.motor_neutral()
         elif self.has_motor and self.config.raw['interlocks'].get('supply_down_requires_motor_neutral'):
             # Dual-output default: supply motion still requires verified motor neutral.
             self.motor_neutral()
+        if wants_brake_released:
+            self.brake_released()
         if not self.open_loop:
             if requested.get('supply_output_enabled_or_verified_external') or 'supply_output_enable' in profile.requires:
                 self.require_true('supply_external_ready')
@@ -328,11 +347,32 @@ class Dispatcher:
                        for value in (0, profile.completion['value'])):
                 raise InterlockError('Repeat-safe supply profile requires zero or already-at-target readback')
 
+    def _enforce_drive_brake_interlocks(self, role, value):
+        interlocks = self.config.raw['interlocks']
+        if not (self.has_motor and self.has_brake):
+            return
+        if not interlocks.get('drive_brake_mutual_exclusion', True):
+            return
+        release = self.outputs[BRAKE]['brake_release_aout_v']
+        neutral = self.outputs[MOTOR]['neutral_aout_v']
+        if role == BRAKE and value != release:
+            drive = self.states[MOTOR].value
+            if drive is None or not math.isclose(drive, neutral, abs_tol=1e-6, rel_tol=0):
+                raise InterlockError('Zero drive before brake: vesc_throttle must be neutral')
+        if role == MOTOR and value != neutral:
+            brake = self.states[BRAKE].value
+            if brake is None or not math.isclose(brake, release, abs_tol=1e-6, rel_tol=0):
+                raise InterlockError('Release brake before drive: vesc_brake must be at release')
+
     def command(self, role, value):
         if role not in self.outputs:
             raise ControlError(f'{role}: role is not an active configured output')
         spec = self.outputs[role]
         value = number(value, 'setpoint', spec['min_aout_v'], spec['max_aout_v'])
+        if role == BRAKE and self.config.raw['live_control'].get('enable_physical_brake') is not True:
+            if spec['authorization'].get('physical') is True:
+                raise AuthorizationError('Live physical braking is disabled')
+        self._enforce_drive_brake_interlocks(role, value)
         if not self.open_loop:
             controller = require_controller()
             measured = {name: self.sample(name) for name in self.config.raw.get('measurements', {})}
@@ -359,36 +399,57 @@ class Dispatcher:
                        'physical_voltage_established': False, 'retry_attempted': False})
             raise
         self.states[role].value = value
-        # Supply hold_final persists demand; motor returns to neutral when commanded there.
+        # Supply hold_final persists demand; motor/brake clear ownership at safe levels.
         if role == SUPPLY:
             self.states[role].held_by = self.active_profile
+        elif role == BRAKE:
+            release = spec['brake_release_aout_v']
+            self.states[role].held_by = None if value == release else self.active_profile
         else:
             self.states[role].held_by = None if value == spec.get('neutral_aout_v', 0) else self.active_profile
         self.emit({'event': 'setpoint_ack', 'simulated': not self.physical, 'output': role,
                    'requested_v': value, 'readback_v': actual, 'physical_voltage_established': False})
 
     def compile(self, profile):
-        value, elapsed = self.states[profile.output].value, 0.0
-        segments, checkpoints = [], []
+        roles = profile.outputs
+        values = {role: self.states[role].value for role in roles}
+        elapsed = 0.0
+        segments = {role: [] for role in roles}
+        checkpoints = []
         for index, step in enumerate(profile.steps):
             kind, params = step['type'], step.get('params', {})
             if kind == 'set_aout':
-                if value != params['value']:
+                channel = params['channel']
+                if values[channel] != params['value']:
                     raise ControlError('Initial set_aout cannot jump from an existing demand')
-                if profile.output == SUPPLY and not self.open_loop:
+                if channel == SUPPLY and not self.open_loop:
                     self.require_true('supply_disabled')
             elif kind in {'hold', 'ramp_aout'}:
                 duration = finite_number(params['duration_s'], 'duration')
-                target = value if kind == 'hold' else finite_number(params['target'], 'target')
-                if 'rate_per_s' in params and not math.isclose(
-                        params['rate_per_s'], abs(target - value) / duration, rel_tol=1e-9, abs_tol=1e-12):
-                    raise ControlError('Ramp rate disagrees with actual starting readback')
-                segments.append(Segment(elapsed, elapsed + duration, value, target, f'{index}_{kind}'))
+                if kind == 'hold':
+                    for role in roles:
+                        current = values[role]
+                        segments[role].append(
+                            Segment(elapsed, elapsed + duration, current, current, f'{index}_hold_{role}'))
+                else:
+                    channel = params['channel']
+                    target = finite_number(params['target'], 'target')
+                    current = values[channel]
+                    if 'rate_per_s' in params and not math.isclose(
+                            params['rate_per_s'], abs(target - current) / duration, rel_tol=1e-9, abs_tol=1e-12):
+                        raise ControlError('Ramp rate disagrees with actual starting readback')
+                    for role in roles:
+                        start_v = values[role]
+                        end_v = target if role == channel else start_v
+                        segments[role].append(
+                            Segment(elapsed, elapsed + duration, start_v, end_v, f'{index}_{kind}_{role}'))
+                    values[channel] = target
                 elapsed += duration
-                value = target
             elif kind == 'checkpoint':
                 checkpoints.append((elapsed, params['name']))
-        return HeldPattern(profile.name, tuple(segments)), checkpoints
+        pattern = MultiOutputPattern(
+            profile.name, roles, {role: tuple(items) for role, items in segments.items()})
+        return pattern, checkpoints
 
     def execute_profile(self, name, *, trigger_observed=None):
         if not self.prepared or self.active_profile is not None:
@@ -399,10 +460,12 @@ class Dispatcher:
             require_controller()
         profile = self.config.profiles[name]
         role = profile.output
+        roles = profile.outputs
         relative = profile.steps[0]['type'] == 'relative_aout_step'
         completion_target = profile.completion['value']
         try:
-            self.verify(role)
+            for owned in roles:
+                self.verify(owned)
             self.assert_preconditions(profile)
             if relative:
                 current = self.states[role].last_readback_v
@@ -415,7 +478,7 @@ class Dispatcher:
                 completion_target = SUPPLY_DEMAND_GRID[max(0, min(adjacent, len(SUPPLY_DEMAND_GRID) - 1))]
         except Exception as exc:
             self.emit({'event': 'profile_precondition_failed', 'assignment': name, 'profile': profile.name,
-                       'output': role, 'error_type': type(exc).__name__, 'error': str(exc),
+                       'output': role, 'outputs': list(roles), 'error_type': type(exc).__name__, 'error': str(exc),
                        'profile_started': False})
             raise
         if trigger_observed is not None and not 0 <= self.clock() - trigger_observed <= self.config.raw['timing']['max_trigger_gap_ms'] / 1000:
@@ -424,12 +487,13 @@ class Dispatcher:
                        'message': 'Precondition checks aged out the edge; no run. Apply a fresh LOW then HIGH.'})
             return
         current = self.states[role].last_readback_v if relative else self.states[role].value
-        self.active_profile, self.active_role = profile.name, role
+        self.active_profile, self.active_role, self.active_roles = profile.name, role, roles
         self.started += 1
         self.interrupted_cycle = True
         self.snapshot('profile_ownership_acquired')
         self.emit({'event': 'profile_started', 'assignment': name, 'profile': profile.name,
-                   'output': role, 'dispatcher_state': 'running', 'button_polling': 'paused',
+                   'output': role, 'outputs': list(roles), 'dispatcher_state': 'running',
+                   'button_polling': 'paused',
                    'message': 'Button edges are not observed during playback; no queue or DOUT cancel. Use independent physical stop if needed.'})
         try:
             requirements = [s.get('params', {}) for s in profile.steps if s['type'] == 'assert_preconditions']
@@ -461,6 +525,8 @@ class Dispatcher:
             else:
                 pattern, checkpoints = self.compile(profile)
                 sent = set()
+                # Seed from readback; force one initial write per role to match execute_timeline.
+                last_values = {owned: None for owned in roles}
 
                 def progress(record):
                     if record.get('event') == 'progress':
@@ -470,42 +536,78 @@ class Dispatcher:
                                 self.emit({'event': 'checkpoint', 'profile': profile.name, 'name': checkpoint,
                                            'local_marker_only': True,
                                            'marker_enabled': self.config.raw['recording']['markers']})
-                    self.emit({**record, 'profile': profile.name, 'output': role, 'simulated': not self.physical})
+                    self.emit({**record, 'profile': profile.name, 'output': role,
+                               'outputs': list(roles), 'simulated': not self.physical})
 
-                def guard(value):
-                    self.verify(role)
-                    if role == MOTOR:
+                def apply_values(values_by_role):
+                    # Serialize SCPI/fixture writes; refuse partial continuation after a mid-set failure.
+                    for owned in roles:
+                        self.verify(owned)
+                    if MOTOR in roles:
                         self.motor_interlocks(profile)
-                    else:
+                    if SUPPLY in roles:
                         if self.has_motor and self.config.raw['interlocks'].get(
                                 'supply_down_requires_motor_neutral'):
                             self.motor_neutral()
-                        if (self.has_supply and value < self.states[SUPPLY].value - 1e-9 and
+                        supply_target = values_by_role[SUPPLY]
+                        if (self.has_supply and supply_target < self.states[SUPPLY].value - 1e-9 and
                                 self.has_motor):
                             self.regen_safe()
-                    self.command(role, value)
+                    written = []
+                    try:
+                        for owned in roles:
+                            target = values_by_role[owned]
+                            prior = last_values[owned]
+                            if prior is None or not math.isclose(prior, target, abs_tol=1e-12, rel_tol=0):
+                                self.command(owned, target)
+                                written.append(owned)
+                                last_values[owned] = target
+                    except BaseException:
+                        self.emit({'event': 'coordinated_partial_update_failed', 'profile': profile.name,
+                                   'outputs': list(roles), 'written_before_failure': written,
+                                   'requested': values_by_role, 'physical_voltage_established': False})
+                        raise
+
+                def guard(value):
+                    if isinstance(pattern, MultiOutputPattern) and len(roles) > 1:
+                        # Test/injected timelines may still pass a primary scalar; expand from pattern clock.
+                        raise ControlError('Coordinated profiles require multi-output timeline values')
+                    apply_values({role: value})
 
                 def verify(value):
-                    if role == MOTOR:
+                    if MOTOR in roles:
                         self.motor_interlocks(profile)
-                    elif self.has_motor and self.config.raw['interlocks'].get(
+                    elif self.has_motor and SUPPLY in roles and self.config.raw['interlocks'].get(
                             'supply_down_requires_motor_neutral'):
                         self.motor_neutral()
-                    self.verify(role, value)
+                    if isinstance(value, dict):
+                        for owned, target in value.items():
+                            self.verify(owned, target)
+                    else:
+                        self.verify(role, value)
 
                 began = self.clock()
-                result = self.timeline(pattern, guard, verify, progress,
-                                       interval_s=self.config.raw['timing']['interval_ms'] / 1000,
-                                       max_lateness_s=self.config.raw['timing']['max_lateness_ms'] / 1000,
-                                       clock=self.clock, wait=self.wait)
+                if isinstance(pattern, MultiOutputPattern) and len(roles) > 1:
+                    result = self._run_multi_timeline(pattern, apply_values, verify, progress)
+                else:
+                    # Single-role MultiOutputPattern still speaks value_at()/scalar guard.
+                    def single_guard(value):
+                        apply_values({role: value})
+
+                    result = self.timeline(pattern, single_guard, verify, progress,
+                                           interval_s=self.config.raw['timing']['interval_ms'] / 1000,
+                                           max_lateness_s=self.config.raw['timing']['max_lateness_ms'] / 1000,
+                                           clock=self.clock, wait=self.wait)
                 if self.clock() - began > profile.timeout_s:
                     raise TimeoutError('Profile exceeded timeout including I/O')
             self.verify(role, completion_target)
+            if BRAKE in roles:
+                self.verify(BRAKE, self.outputs[BRAKE]['brake_release_aout_v'])
             self.states[role].held_by = profile.name if profile.completion['mode'] == 'hold_final' else None
             self.completed += 1
             self.interrupted_cycle = False
             self.emit({'event': 'pattern_cycle_complete', 'assignment': name, 'profile': profile.name,
-                       'output': role, 'completion': profile.completion['mode'],
+                       'output': role, 'outputs': list(roles), 'completion': profile.completion['mode'],
                        'simulated': not self.physical, **result})
             self.snapshot('profile_completion_state')
         except BaseException:
@@ -513,6 +615,7 @@ class Dispatcher:
             raise
         finally:
             self.active_profile = self.active_role = None
+            self.active_roles = ()
 
     def monitor(self):
         timing = self.config.raw['timing']
@@ -578,6 +681,69 @@ class Dispatcher:
                 self.maybe_poll_telemetry(budget_s=timing['poll_ms'] / 2000)
             self.wait(timing['poll_ms'] / 1000)
 
+    def _run_multi_timeline(self, pattern, apply_values, verify, progress):
+        """Deterministic coordinated playback with serialized per-tick role writes."""
+        interval_s = self.config.raw['timing']['interval_ms'] / 1000
+        max_lateness_s = self.config.raw['timing']['max_lateness_ms'] / 1000
+        # Offline tests inject a multi-aware boundary timeline; stock execute_timeline is scalar-only.
+        if self.timeline is not execute_timeline:
+            return self.timeline(pattern, apply_values, verify, progress,
+                                 interval_s=interval_s, max_lateness_s=max_lateness_s,
+                                 clock=self.clock, wait=self.wait)
+        started = self.clock()
+        deadline = started
+        last_values = None
+        last_phase = None
+        last_progress = -math.inf
+        skipped = 0
+        maximum_lateness = 0.0
+
+        def elapsed_at(now):
+            reached = (t for t in pattern.boundaries if now >= started + t)
+            return max(now - started, max(reached, default=0.0))
+
+        while True:
+            self.wait(max(0.0, deadline - self.clock()))
+            now = self.clock()
+            late = max(0.0, now - deadline)
+            maximum_lateness = max(maximum_lateness, late)
+            if late > max_lateness_s:
+                raise TimeoutError(f'Pattern update exceeded the lateness limit: {late:.3f}s')
+            elapsed = elapsed_at(now)
+            values = pattern.values_at(elapsed)
+            phase = pattern.phase_at(elapsed)
+            operation_started = self.clock()
+            progress_due = phase != last_phase or elapsed - last_progress >= .5
+            if last_values is None or any(
+                    not math.isclose(last_values[role], values[role], abs_tol=1e-12, rel_tol=0)
+                    for role in pattern.roles):
+                apply_values(values)
+                last_values = dict(values)
+            if progress_due:
+                verify(values)
+                progress({'event': 'progress', 'phase': phase, 'elapsed_s': elapsed,
+                          'nominal_duration_s': pattern.duration_s, 'requested': values,
+                          'lateness_ms': late * 1000,
+                          'io_ms': (self.clock() - operation_started) * 1000})
+                last_progress = elapsed
+                last_phase = phase
+            if elapsed >= pattern.duration_s:
+                actual_elapsed = self.clock() - started
+                completion_lateness = max(0.0, actual_elapsed - pattern.duration_s)
+                if completion_lateness > max_lateness_s:
+                    raise TimeoutError(
+                        f'Final setpoint acknowledgement exceeded the completion limit: {completion_lateness:.3f}s')
+                return {'nominal_duration_s': pattern.duration_s, 'actual_elapsed_s': actual_elapsed,
+                        'completion_lateness_ms': completion_lateness * 1000,
+                        'skipped_update_slots': skipped, 'maximum_lateness_ms': maximum_lateness * 1000}
+            after = elapsed_at(self.clock())
+            due_index = math.floor(max(0, after) / interval_s + 1e-9) + 1
+            prior_index = math.floor(max(0, elapsed) / interval_s + 1e-9)
+            skipped += max(0, due_index - prior_index - 1)
+            future = [due_index * interval_s, pattern.duration_s]
+            future.extend(t for t in pattern.boundaries if t > after)
+            deadline = started + min(future)
+
     def cleanup(self):
         safe = True
         if not self.prepared:
@@ -601,6 +767,22 @@ class Dispatcher:
                 self.states[MOTOR].status = 'unknown'
                 safe = False
                 self.emit({'event': 'motor_neutral_unknown', 'error': str(exc)})
+        if self.has_brake:
+            try:
+                self.context(BRAKE)
+                release = self.outputs[BRAKE]['brake_release_aout_v']
+                if self.open_loop:
+                    self.command(BRAKE, release)
+                else:
+                    self.backend.write(BRAKE, release)
+                    self.verify(BRAKE, release)
+                    self.states[BRAKE].value = release
+                    self.states[BRAKE].held_by = None
+                self.emit({'event': 'brake_release_verified', 'simulated': not self.physical})
+            except (Exception, KeyboardInterrupt) as exc:
+                self.states[BRAKE].status = 'unknown'
+                safe = False
+                self.emit({'event': 'brake_release_unknown', 'error': str(exc)})
         if self.has_supply:
             try:
                 self.verify(SUPPLY)

@@ -1,0 +1,31 @@
+{
+  "schema_version": 3,
+  "name": "ces_motor_regen_trial_b",
+  "description": "Run Regen Test Trial B (regen rehearsal, unmatched open-loop timing): same ADC1 accel to 1.60 V, drive-to-zero+verify, then prompt provisional ADC2 brake (config brake_max). Does not claim matched RPM or recovered energy without measured feedback. Live physical ADC2 remains fail-closed until separately calibrated; brake release is operator-verified 0 V.",
+  "output": "vesc_throttle",
+  "outputs": ["vesc_throttle", "vesc_brake"],
+  "timeout_s": 40,
+  "completion": {"mode": "return_neutral", "value": 0.0},
+  "requires": {"motor_neutral": true, "motor_enable": "operator_verified", "brake_released": true},
+  "steps": [
+    {"type": "assert_preconditions", "params": {"motor_neutral": true, "brake_released": true}},
+    {"type": "set_aout", "params": {"channel": "vesc_throttle", "value": 0.0}},
+    {"type": "set_aout", "params": {"channel": "vesc_brake", "value": 0.0}},
+    {"type": "checkpoint", "params": {"name": "trial_b_regen_accel_begin"}},
+    {"type": "ramp_aout", "params": {"channel": "vesc_throttle", "target": 1.6, "duration_s": 3.0}},
+    {"type": "checkpoint", "params": {"name": "trial_b_regen_hold_160_begin"}},
+    {"type": "hold", "params": {"duration_s": 4.0}},
+    {"type": "checkpoint", "params": {"name": "trial_b_regen_drive_release_begin"}},
+    {"type": "ramp_aout", "params": {"channel": "vesc_throttle", "target": 0.0, "duration_s": 1.0}},
+    {"type": "return_neutral", "params": {"channel": "vesc_throttle"}},
+    {"type": "checkpoint", "params": {"name": "trial_b_regen_brake_prompt_begin"}},
+    {"type": "hold", "params": {"duration_s": 0.5}},
+    {"type": "ramp_aout", "params": {"channel": "vesc_brake", "target": 0.2, "duration_s": 1.0}},
+    {"type": "checkpoint", "params": {"name": "trial_b_regen_brake_hold"}},
+    {"type": "hold", "params": {"duration_s": 4.0}},
+    {"type": "ramp_aout", "params": {"channel": "vesc_brake", "target": 0.0, "duration_s": 1.0}},
+    {"type": "return_neutral", "params": {"channel": "vesc_brake"}},
+    {"type": "checkpoint", "params": {"name": "trial_b_regen_complete"}},
+    {"type": "hold", "params": {"duration_s": 2.0}}
+  ]
+}

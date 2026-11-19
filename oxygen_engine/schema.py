@@ -1,4 +1,4 @@
-"""Schema version 3: one config for open-loop dual-AOUT dispatch (memory or OXYGEN SCPI)."""
+"""Schema version 3: one config for open-loop multi-AOUT dispatch (memory or OXYGEN SCPI)."""
 
 from __future__ import annotations
 
@@ -11,9 +11,15 @@ from .adapters.oxygen import OxygenAdapter
 from .constant_pattern import finite_number
 from .errors import AuthorizationError, ConfigError
 
-ROLES = {'rzxa_voltage_demand': 'supply_voltage_demand', 'vesc_throttle': 'motor_throttle'}
+ROLES = {
+    'rzxa_voltage_demand': 'supply_voltage_demand',
+    'vesc_throttle': 'motor_throttle',
+    'vesc_brake': 'motor_brake',
+}
 SUPPLY = 'rzxa_voltage_demand'
 MOTOR = 'vesc_throttle'
+BRAKE = 'vesc_brake'
+BRAKING_CONTROL_NAME = 'Braking Control'
 # Absolute schema ceiling (typical OXYGEN ConstOutput span). Operator max_aout_v is authoritative
 # within this bound and must still fit the discovered hardware range. Examples keep 0.500 V supply.
 ABSOLUTE_AOUT_MAX_V = 10.0
@@ -22,24 +28,25 @@ VERIFIED_GAIN = 80.0  # 1.000 V AOUT = 80 V bus (verified documentation)
 SUPPLY_DEMAND_GRID = tuple((36.0 + index * 0.5) / VERIFIED_GAIN for index in range(9))
 SUPPLY_DEMAND_STEP = 0.5 / VERIFIED_GAIN
 LIVE_FLAGS = {
-    'enable_physical_aout', 'enable_rzxa_output_toggle', 'enable_real_rzxa_scpi',
-    'require_explicit_hardware_authorization',
+    'enable_physical_aout', 'enable_physical_brake', 'enable_rzxa_output_toggle',
+    'enable_real_rzxa_scpi', 'require_explicit_hardware_authorization',
 }
 OPEN_LOOP_PRECONDITIONS = {
-    'motor_neutral', 'current_aout_must_be_zero_or_already_target', 'reject_other_start_values',
+    'motor_neutral', 'brake_released', 'current_aout_must_be_zero_or_already_target',
+    'reject_other_start_values',
 }
 CLOSED_LOOP_PRECONDITIONS = OPEN_LOOP_PRECONDITIONS | {
     'supply_output_enabled_or_verified_external', 'supply_shutdown_permitted',
     'supply_standalone_test', 'bus_voltage_validated',
 }
-REQUIRES_OPEN = {'motor_neutral', 'motor_enable'}
+REQUIRES_OPEN = {'motor_neutral', 'motor_enable', 'brake_released'}
 REQUIRES_CLOSED = REQUIRES_OPEN | {
     'supply_output_enable', 'measured_bus_feedback', 'no_unhandled_regeneration',
     'supply_standalone_test', 'measured_bus_voltage',
 }
 HARDWARE_ACKNOWLEDGEMENTS = {
     'wiring_verified', 'supply_mapping_verified', 'motor_neutral_verified',
-    'external_emergency_stop_verified', 'external_enable_control_verified',
+    'brake_release_verified', 'external_emergency_stop_verified', 'external_enable_control_verified',
 }
 OUTPUT_ONLY_ACKNOWLEDGEMENTS = {
     'no_live_feedback_acknowledged', 'external_bus_and_regen_protection_verified',
@@ -75,10 +82,15 @@ class Profile:
     path: Path
     name: str
     output: str
+    outputs: tuple[str, ...]
     steps: tuple[dict, ...]
     completion: dict
     timeout_s: float
     requires: dict
+
+    @property
+    def coordinated(self) -> bool:
+        return len(self.outputs) > 1
 
 
 @dataclass(frozen=True)
@@ -117,16 +129,41 @@ class DispatcherConfig:
     def has_motor(self) -> bool:
         return MOTOR in self.raw['outputs']
 
+    @property
+    def has_brake(self) -> bool:
+        return BRAKE in self.raw['outputs']
 
-def load_profile(path, output, spec, *, open_loop: bool):
+
+def _safe_level(role: str, spec: dict) -> float:
+    if role == BRAKE:
+        return float(spec['brake_release_aout_v'])
+    if role == MOTOR:
+        return float(spec.get('neutral_aout_v', 0))
+    return float(spec.get('neutral_aout_v', spec.get('startup_aout_v', 0)))
+
+
+def load_profile(path, output, spec, *, open_loop: bool, configured_outputs: dict | None = None):
     path = Path(path).resolve()
     raw = read_json(path)
-    keys(raw, {'schema_version', 'name', 'description', 'output', 'timeout_s',
+    keys(raw, {'schema_version', 'name', 'description', 'output', 'outputs', 'timeout_s',
                'completion', 'steps', 'requires'}, str(path))
     if type(raw.get('schema_version')) is not int or raw['schema_version'] != 3:
         raise ConfigError(f'{path}: profiles require schema_version 3')
     if raw.get('output') != output or not isinstance(raw.get('name'), str) or not raw['name']:
         raise ConfigError('Profile name/output does not match assignment')
+    configured = configured_outputs or {output: spec}
+    declared = raw.get('outputs', [output])
+    if not isinstance(declared, list) or not declared or any(role not in configured for role in declared):
+        raise ConfigError('Profile outputs must list configured logical roles')
+    if output not in declared:
+        raise ConfigError('Profile primary output must appear in outputs')
+    if len(set(declared)) != len(declared):
+        raise ConfigError('Profile outputs cannot repeat roles')
+    if BRAKE in declared and MOTOR not in declared:
+        raise ConfigError('vesc_brake coordination requires vesc_throttle on the same profile')
+    if SUPPLY in declared and len(declared) > 1:
+        raise ConfigError('Supply profiles remain single-output; drive/brake coordination is separate')
+    participating = tuple(declared)
     completion = raw.get('completion', {'mode': spec['completion_policy'], 'value': spec.get('neutral_aout_v', 0)})
     keys(completion, {'mode', 'value', 'operator_action_required_to_stop'}, 'completion')
     mode = completion.get('mode')
@@ -135,6 +172,8 @@ def load_profile(path, output, spec, *, open_loop: bool):
         isinstance(step, dict) and step.get('type') == 'relative_aout_step' for step in steps)
     if spec['role'] == 'motor_throttle' and mode != 'return_neutral':
         raise ConfigError('Motor profiles must return to verified neutral')
+    if spec['role'] == 'motor_brake':
+        raise ConfigError('vesc_brake cannot be the primary assignment output; coordinate under vesc_throttle')
     if spec['role'] == 'supply_voltage_demand' and mode not in {'hold_final', 'verify_zero'}:
         raise ConfigError('Supply completion must explicitly hold_final or verify_zero')
     if relative:
@@ -156,7 +195,8 @@ def load_profile(path, output, spec, *, open_loop: bool):
         raise ConfigError('Provide 1..120 profile steps')
     allowed_pre = OPEN_LOOP_PRECONDITIONS if open_loop else CLOSED_LOOP_PRECONDITIONS
     allowed_req = REQUIRES_OPEN if open_loop else REQUIRES_CLOSED
-    elapsed, target, started, timed = 0.0, None, False, 0
+    elapsed, started, timed = 0.0, False, 0
+    targets = {role: None for role in participating}
     for step in steps:
         keys(step, {'type', 'params', 'description'}, 'step')
         kind, params = step.get('type'), step.get('params', {})
@@ -187,29 +227,51 @@ def load_profile(path, output, spec, *, open_loop: bool):
                 raise ConfigError('Checkpoint needs a name')
             continue
         started = True
-        if kind in {'set_aout', 'ramp_aout', 'return_neutral'} and params.get('channel') != output:
-            raise ConfigError('A profile may write only its assigned logical output')
+        channel = params.get('channel')
+        if kind in {'set_aout', 'ramp_aout', 'return_neutral'}:
+            if channel not in participating:
+                raise ConfigError('A profile may write only its declared logical outputs')
+            channel_spec = configured[channel]
         if kind == 'set_aout':
-            value = number(params['value'], 'setpoint', spec['min_aout_v'], spec['max_aout_v'])
-            if timed or value != spec.get('neutral_aout_v', 0):
-                raise ConfigError('Only initial neutral set_aout is supported; transitions must ramp')
-            target = value
+            value = number(params['value'], 'setpoint', channel_spec['min_aout_v'], channel_spec['max_aout_v'])
+            safe = _safe_level(channel, channel_spec)
+            if timed or value != safe:
+                raise ConfigError('Only initial safe-level set_aout is supported; transitions must ramp')
+            targets[channel] = value
         elif kind in {'ramp_aout', 'hold'}:
             elapsed += number(params['duration_s'], 'duration', .1, 300)
             timed += 1
             if kind == 'ramp_aout':
-                new_target = number(params['target'], 'target', spec['min_aout_v'], spec['max_aout_v'])
+                new_target = number(params['target'], 'target', channel_spec['min_aout_v'], channel_spec['max_aout_v'])
+                prior = targets[channel]
                 if 'rate_per_s' in params:
                     rate = number(params['rate_per_s'], 'rate', 0, 100)
-                    if target is not None and not math.isclose(
-                            rate, abs(new_target - target) / params['duration_s'], rel_tol=1e-9, abs_tol=1e-12):
+                    if prior is not None and not math.isclose(
+                            rate, abs(new_target - prior) / params['duration_s'], rel_tol=1e-9, abs_tol=1e-12):
                         raise ConfigError('Ramp rate disagrees with duration and target')
-                target = new_target
+                # Drive/brake mutual exclusion on the compiled timeline.
+                if channel == BRAKE and MOTOR in targets:
+                    drive = targets[MOTOR]
+                    if drive is not None and drive != configured[MOTOR].get('neutral_aout_v', 0):
+                        raise ConfigError('Zero drive before brake: vesc_throttle must be neutral before vesc_brake demand')
+                if channel == MOTOR and BRAKE in targets:
+                    brake = targets[BRAKE]
+                    release = configured[BRAKE]['brake_release_aout_v']
+                    if brake is not None and brake != release:
+                        raise ConfigError('Release brake before drive: vesc_brake must be at release before vesc_throttle demand')
+                targets[channel] = new_target
         else:
-            if spec['role'] != 'motor_throttle' or target != spec['neutral_aout_v']:
-                raise ConfigError('return_neutral requires an explicit preceding motor ramp to neutral')
-    if not relative and (not 1 <= timed <= 100 or elapsed > 300 or target != final):
+            if channel not in {MOTOR, BRAKE}:
+                raise ConfigError('return_neutral applies only to vesc_throttle or vesc_brake')
+            expected = _safe_level(channel, channel_spec)
+            if targets[channel] != expected:
+                raise ConfigError('return_neutral requires an explicit preceding ramp to the safe level')
+    primary_final = targets[output]
+    if not relative and (not 1 <= timed <= 100 or elapsed > 300 or primary_final != final):
         raise ConfigError('Need 1..100 timed steps, <=300 seconds, and final target matching completion')
+    if BRAKE in participating and not relative:
+        if targets[BRAKE] != configured[BRAKE]['brake_release_aout_v']:
+            raise ConfigError('Coordinated profiles must finish with vesc_brake at brake_release_aout_v')
     timeout = number(raw.get('timeout_s', 300), 'timeout', .1 if relative else elapsed, 600)
     requires = raw.get('requires', {})
     keys(requires, allowed_req, 'requires')
@@ -218,6 +280,7 @@ def load_profile(path, output, spec, *, open_loop: bool):
         'measured_bus_feedback': 'required_for_motor_interlock',
         'motor_enable': 'operator_verified',
         'motor_neutral': True,
+        'brake_released': True,
         'no_unhandled_regeneration': True,
         'supply_standalone_test': True,
     }
@@ -233,24 +296,32 @@ def load_profile(path, output, spec, *, open_loop: bool):
         number(feedback['target_v'], 'bus target', 1, 60)
         number(feedback['tolerance_v'], 'bus tolerance', .01, 5)
         number(feedback['max_age_s'], 'feedback age', .01, 1)
-    return Profile(path, raw['name'], output, tuple(steps), completion, timeout, requires)
+    return Profile(path, raw['name'], output, participating, tuple(steps), completion, timeout, requires)
 
 
 def _validate_outputs(raw, *, physical: bool, open_loop: bool):
-    from .drive_limits import authorize_dispatcher_motor_max, motor_role_keys
+    from .drive_limits import (
+        authorize_dispatcher_brake_range, authorize_dispatcher_motor_max, brake_role_keys, motor_role_keys,
+    )
 
     outputs = raw.get('outputs')
     if not isinstance(outputs, dict) or not outputs or set(outputs) - set(ROLES):
         raise ConfigError(
-            'outputs must configure at least one known role: rzxa_voltage_demand and/or vesc_throttle')
+            'outputs must configure at least one known role: '
+            'rzxa_voltage_demand, vesc_throttle, and/or vesc_brake')
     names, ids, bindings = set(), set(), set()
     for role, spec in outputs.items():
-        allowed = motor_role_keys() if role == MOTOR else {
-            'role', 'channel', 'display_name', 'expected_id', 'channel_discovery_required', 'binding',
-            'authorization', 'mode', 'source', 'const_property', 'min_aout_v', 'max_aout_v',
-            'startup_aout_v', 'neutral_aout_v', 'neutral_verified', 'mapping_verified', 'mapping',
-            'output_enable', 'completion_policy', 'on_cancel', 'on_fault', 'on_shutdown',
-        }
+        if role == MOTOR:
+            allowed = motor_role_keys()
+        elif role == BRAKE:
+            allowed = brake_role_keys()
+        else:
+            allowed = {
+                'role', 'channel', 'display_name', 'expected_id', 'channel_discovery_required', 'binding',
+                'authorization', 'mode', 'source', 'const_property', 'min_aout_v', 'max_aout_v',
+                'startup_aout_v', 'neutral_aout_v', 'neutral_verified', 'mapping_verified', 'mapping',
+                'output_enable', 'completion_policy', 'on_cancel', 'on_fault', 'on_shutdown',
+            }
         keys(spec, allowed, role)
         binding = exact_name(spec.get('binding'), f'{role} binding')
         if binding in bindings:
@@ -270,7 +341,12 @@ def _validate_outputs(raw, *, physical: bool, open_loop: bool):
         permission = spec.get('authorization')
         if not isinstance(permission, dict) or set(permission) != {'simulation', 'physical'}:
             raise ConfigError('Each output requires authorization.simulation and authorization.physical')
-        if physical:
+        role_physical = permission.get('physical') is True
+        if role == BRAKE and role_physical:
+            # Fail-closed: live braking stays disabled even if other AOUT roles are physical.
+            raise ConfigError(
+                'Physical vesc_brake authorization is disabled; live braking is not enabled')
+        if physical and role != BRAKE:
             if permission['simulation'] is not False or permission['physical'] is not True:
                 raise ConfigError('Physical outputs require simulation false / physical true')
             if not isinstance(spec.get('channel'), str) or not spec['channel'].strip():
@@ -284,6 +360,9 @@ def _validate_outputs(raw, *, physical: bool, open_loop: bool):
                 names.add(exact_name(channel, role))
             elif channel is not None:
                 raise ConfigError('Memory transport leaves channel null; fixture name lives under simulation.outputs')
+        if role == BRAKE and raw['transport'] == 'oxygen_scpi' and isinstance(spec.get('channel'), str):
+            if exact_name(spec['channel'], role) != BRAKING_CONTROL_NAME:
+                raise ConfigError(f'vesc_brake channel must be exactly {BRAKING_CONTROL_NAME!r}')
         cid = spec.get('expected_id')
         if cid is not None:
             OxygenAdapter._channel_id(cid)
@@ -291,28 +370,40 @@ def _validate_outputs(raw, *, physical: bool, open_loop: bool):
                 raise ConfigError('Expected IDs cannot alias')
             ids.add(cid)
         # Operator-configured max is authoritative within the absolute ConstOutput span.
-        number(spec.get('min_aout_v'), 'minimum', 0, 0)
-        if role == MOTOR:
-            authorize_dispatcher_motor_max(spec, physical=physical)
+        if role == BRAKE:
+            authorize_dispatcher_brake_range(spec, physical=False)
         else:
+            number(spec.get('min_aout_v'), 'minimum', 0, 0)
+        if role == MOTOR:
+            authorize_dispatcher_motor_max(spec, physical=physical and role_physical)
+        elif role == SUPPLY:
             number(spec['max_aout_v'], 'maximum', .001, ABSOLUTE_AOUT_MAX_V)
-        policy = 'preserve_demand' if role == SUPPLY else 'return_neutral'
+        if role == SUPPLY:
+            policy = 'preserve_demand'
+        elif role == BRAKE:
+            policy = 'return_release'
+        else:
+            policy = 'return_neutral'
         if any(spec.get(k) != policy for k in ('on_cancel', 'on_fault', 'on_shutdown')):
-            raise ConfigError('Supply must preserve demand; motor must attempt neutral on termination')
+            raise ConfigError(
+                'Supply must preserve demand; motor must attempt neutral; brake must attempt release')
         if role == MOTOR:
             number(spec.get('neutral_aout_v'), 'motor neutral', 0, 0)
             if spec.get('completion_policy') != 'return_neutral':
                 raise ConfigError('Motor completion_policy must be return_neutral')
-            if physical and spec.get('neutral_verified') is not True:
+            if physical and role_physical and spec.get('neutral_verified') is not True:
                 raise ConfigError('Physical motor requires explicitly verified 0 V neutral')
-            if not physical and spec.get('neutral_verified') is not False:
+            if not (physical and role_physical) and spec.get('neutral_verified') is not False:
                 raise ConfigError('Simulated motor neutral_verified must remain false')
+        elif role == BRAKE:
+            if spec.get('completion_policy') != 'return_release':
+                raise ConfigError('Brake completion_policy must be return_release')
         else:
             number(spec.get('startup_aout_v'), 'startup', 0, 0)
             if spec.get('completion_policy') != 'hold_final':
                 raise ConfigError('Supply completion_policy must be hold_final')
             mapping = spec.get('mapping', {})
-            if physical:
+            if physical and role_physical:
                 keys(mapping, {'type', 'gain_bus_v_per_aout_v', 'verified'}, 'verified supply mapping')
                 if mapping.get('type') != 'linear_verified' or mapping.get('verified') is not True:
                     raise ConfigError('Declare verified supply mapping; never infer from channel names')
@@ -327,6 +418,8 @@ def _validate_outputs(raw, *, physical: bool, open_loop: bool):
                     raise ConfigError('Simulated supply documents gain 80 V/V as provisional, verified false')
                 if spec.get('output_enable') != 'NOT_CONTROLLED_BY_AOUT' or spec.get('mapping_verified') is not False:
                     raise ConfigError('Simulated supply enable/mapping must remain unverified')
+    if BRAKE in outputs and MOTOR not in outputs:
+        raise ConfigError('vesc_brake requires an active vesc_throttle role in the same dispatcher')
     return outputs
 
 
@@ -365,6 +458,11 @@ def load_dispatcher_config(path) -> DispatcherConfig:
         raise ConfigError('transport must be memory or oxygen_scpi')
     flags = raw.get('live_control', {})
     keys(flags, LIVE_FLAGS, 'live_control')
+    # Backward compatible default: live braking stays off unless an explicit future enable is reviewed.
+    flags.setdefault('enable_physical_brake', False)
+    raw['live_control'] = flags
+    if flags.get('enable_physical_brake') is True:
+        raise ConfigError('Live physical braking remains disabled until separately commissioned')
     physical = False
     outputs_probe = raw.get('outputs')
     if isinstance(outputs_probe, dict):
@@ -374,11 +472,13 @@ def load_dispatcher_config(path) -> DispatcherConfig:
         )
     if physical:
         expected = {
-            'enable_physical_aout': True, 'enable_rzxa_output_toggle': False,
-            'enable_real_rzxa_scpi': False, 'require_explicit_hardware_authorization': True,
+            'enable_physical_aout': True, 'enable_physical_brake': False,
+            'enable_rzxa_output_toggle': False, 'enable_real_rzxa_scpi': False,
+            'require_explicit_hardware_authorization': True,
         }
         if any(flags.get(k) is not v for k, v in expected.items()):
-            raise ConfigError('Physical live_control enables AOUT only; RZ-XA SCPI stays disabled')
+            raise ConfigError(
+                'Physical live_control enables AOUT only; RZ-XA SCPI and live braking stay disabled')
         acks = raw.get('hardware_authorization', {})
         active = set(outputs_probe) if isinstance(outputs_probe, dict) else set()
         required_acks = {
@@ -388,6 +488,7 @@ def load_dispatcher_config(path) -> DispatcherConfig:
             required_acks.add('supply_mapping_verified')
         if MOTOR in active:
             required_acks.add('motor_neutral_verified')
+        # brake_release_verified is reserved for a future live-brake authorization path.
         keys(acks, HARDWARE_ACKNOWLEDGEMENTS, 'hardware_authorization')
         if set(acks) != required_acks or any(acks.get(k) is not True for k in required_acks):
             raise ConfigError(
@@ -485,6 +586,7 @@ def load_dispatcher_config(path) -> DispatcherConfig:
         'motor_supply_demand_v', 'supply_down_requires_motor_neutral', 'require_supply_demand_before_motor',
         'motor_supply_demands_v', 'supply_demand_grid_commissioned',
     }
+    drive_brake = {'drive_brake_mutual_exclusion', 'zero_drive_before_brake', 'release_brake_before_drive'}
     feedback_keys = {
         'bus_target_v', 'bus_tolerance_v', 'max_feedback_age_s',
         'motor_requires_measured_bus_in_range', 'allow_unverified_simulated_interlock_values',
@@ -496,6 +598,8 @@ def load_dispatcher_config(path) -> DispatcherConfig:
     elif MOTOR in active:
         # Motor-only: cross-role supply prereq may be explicitly disabled.
         allowed_interlocks |= {'require_supply_demand_before_motor'}
+    if MOTOR in active and BRAKE in active:
+        allowed_interlocks |= drive_brake
     if not open_loop:
         allowed_interlocks |= feedback_keys
     keys(interlocks, allowed_interlocks, 'interlocks')
@@ -503,6 +607,10 @@ def load_dispatcher_config(path) -> DispatcherConfig:
         raise ConfigError('one_active_profile_global must be true')
     if interlocks.get('external_emergency_stop_required_for_live') is not True:
         raise ConfigError('external_emergency_stop_required_for_live must be true')
+    if MOTOR in active and BRAKE in active:
+        for key in drive_brake:
+            if interlocks.get(key) is not True:
+                raise ConfigError(f'{key} must be true when vesc_throttle and vesc_brake are both configured')
     demand = None
     if SUPPLY in active and MOTOR in active:
         if type(interlocks.get('supply_down_requires_motor_neutral')) is not bool:
@@ -575,6 +683,11 @@ def load_dispatcher_config(path) -> DispatcherConfig:
             OxygenAdapter._channel_id(str(fixture['id']))
             if fixture.get('mode') != 'ConstOutput' or fixture.get('unit') != 'V':
                 raise ConfigError('Fixture outputs must be ConstOutput in V')
+        if BRAKE in outputs:
+            brake_binding = outputs[BRAKE]['binding']
+            if fixtures[brake_binding].get('name') != BRAKING_CONTROL_NAME:
+                raise ConfigError(
+                    f'Memory vesc_brake fixture name must be exactly {BRAKING_CONTROL_NAME!r}')
         telemetry = simulation.get('telemetry', {}) or {}
         if not isinstance(telemetry, dict):
             raise ConfigError('simulation.telemetry must be an object')
@@ -621,7 +734,8 @@ def load_dispatcher_config(path) -> DispatcherConfig:
         if output not in outputs:
             raise ConfigError('Unknown output role')
         filename = exact_name(assignment.get('profile'), 'profile path')
-        profile = load_profile(path.parent / filename, output, outputs[output], open_loop=open_loop)
+        profile = load_profile(
+            path.parent / filename, output, outputs[output], open_loop=open_loop, configured_outputs=outputs)
         if any(step['type'] == 'relative_aout_step' for step in profile.steps):
             if physical and interlocks.get('supply_demand_grid_commissioned') is not True:
                 raise ConfigError('Physical relative steps require supply_demand_grid_commissioned true after separate review')
@@ -632,6 +746,15 @@ def load_dispatcher_config(path) -> DispatcherConfig:
                 if step['type'] == 'assert_preconditions' and step.get('params', {}).get('motor_neutral'):
                     raise ConfigError(
                         f'{name}: assert_preconditions.motor_neutral needs an active vesc_throttle role')
+        if BRAKE not in outputs:
+            if profile.requires.get('brake_released') or BRAKE in profile.outputs:
+                raise ConfigError(f'{name}: brake coordination needs an active vesc_brake role')
+            for step in profile.steps:
+                params = step.get('params', {})
+                if step['type'] == 'assert_preconditions' and params.get('brake_released'):
+                    raise ConfigError(f'{name}: assert_preconditions.brake_released needs vesc_brake')
+                if params.get('channel') == BRAKE:
+                    raise ConfigError(f'{name}: profile writes vesc_brake but role is not configured')
         if SUPPLY not in outputs and output == MOTOR:
             # Motor-only is allowed; cross-role supply demand is gated by interlocks, not profile load.
             pass

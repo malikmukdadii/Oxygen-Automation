@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from oxygen_engine.closed_loop import register_controller
-from oxygen_engine.dispatcher import MOTOR, SUPPLY, Dispatcher
+from oxygen_engine.dispatcher import BRAKE, MOTOR, SUPPLY, Dispatcher
 from oxygen_engine.errors import AuthorizationError, ControlNotReady, InterlockError
 from oxygen_engine.main import main
 from oxygen_engine.memory_backend import MemoryBackend
@@ -36,6 +36,15 @@ class Clock:
 
 def boundary_timeline(pattern, guard, verify, progress, *, interval_s, max_lateness_s, clock, wait):
     elapsed = 0.0
+    if hasattr(pattern, 'values_at') and len(getattr(pattern, 'roles', ())) > 1:
+        for elapsed in pattern.boundaries:
+            values = pattern.values_at(elapsed)
+            guard(values)
+            verify(values)
+            progress({'event': 'progress', 'elapsed_s': elapsed, 'phase': pattern.phase_at(elapsed),
+                      'requested': values})
+            wait(0)
+        return {'actual_elapsed_s': elapsed, 'skipped_updates': 0, 'maximum_lateness_s': 0.0}
     for segment in pattern.segments:
         elapsed = segment.end_s
         value = pattern.value_at(elapsed)
@@ -203,7 +212,7 @@ def test_scpi_txn_count_no_rediscover_during_ramp(monkeypatch):
     for index, spec in enumerate(outputs.values()):
         cid = str(18446744073709551615 - index)
         channels.append((cid, spec['channel']))
-        slot = 1 - index
+        slot = index
         properties[cid] = {
             'Mode': '(STRING,"ConstOutput")',
             'TRION/SourceChannel_A': f'(STRING,"CONST{slot}")',
@@ -315,7 +324,8 @@ def test_scpi_txn_count_no_rediscover_during_ramp(monkeypatch):
 
     monkeypatch.setattr('oxygen_engine.oxygen_backend.OxygenTransport', Proxy)
     records = []
-    backend = OxygenBackend(config, records.append, confirmed_outputs=['Test Aout2', 'Test Aout1'])
+    confirmed = [spec['channel'] for spec in config.raw['outputs'].values()]
+    backend = OxygenBackend(config, records.append, confirmed_outputs=confirmed)
     clock = Clock()
     dispatcher = Dispatcher(config, backend, records.append, clock=clock, wait=clock.wait,
                             timeline=boundary_timeline)
@@ -375,9 +385,10 @@ def test_open_loop_sample_refuses_control_path():
 def test_confirm_outputs_has_no_name_whitelist():
     config = load_dispatcher_config(DEMO)
     # Any exact configured names work; whitelist removed.
-    confirm_outputs(config, ['Test Aout2', 'Test Aout1'], live=False)
+    required = sorted(spec['channel'] for spec in config.raw['outputs'].values())
+    confirm_outputs(config, required, live=False)
     with pytest.raises(AuthorizationError, match='Confirm every configured'):
-        confirm_outputs(config, ['Test Aout2'], live=False)
+        confirm_outputs(config, required[:1], live=False)
     physical = load_dispatcher_config(HARDWARE)
     with pytest.raises(AuthorizationError, match='--live'):
         confirm_outputs(physical, ['Test Aout2', 'Test Aout1'], live=False)
@@ -607,7 +618,7 @@ def test_motor_only_initialization_and_execution(tmp_path):
 
 def test_dual_output_still_works():
     config = load_dispatcher_config(EXAMPLE)
-    assert config.active_roles == frozenset({SUPPLY, MOTOR})
+    assert config.active_roles == frozenset({SUPPLY, MOTOR, BRAKE})
     clock = Clock()
     backend = MemoryBackend(config, clock=clock)
     dispatcher = Dispatcher(config, backend, lambda *_: None, clock=clock, wait=clock.wait,
@@ -618,6 +629,7 @@ def test_dual_output_still_works():
     dispatcher.execute_profile('motor_gentle')
     assert dispatcher.states[SUPPLY].value == 0.5
     assert dispatcher.states[MOTOR].value == 0
+    assert dispatcher.states[BRAKE].value == 0
 
 
 def test_operator_configured_voltage_limit_authoritative(tmp_path):

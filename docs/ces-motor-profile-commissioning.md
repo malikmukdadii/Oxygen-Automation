@@ -43,8 +43,10 @@ are still required. No local flag is cleared or enabled automatically.
 `examples/ces-motor-commissioning.json` is a new memory-only rehearsal config, not the live
 operator file. It uses fake in-process AOUT fixtures, an initial supply demand of 0.50 V and
 an initial motor demand of 0 V normal stop. All physical actuation flags are false; both mapping
-and neutral verification are false. Explicit output-level 1.00 V commissioning fields are
-**fake rehearsal authorization only**, not a claim that 1.00 V is physically permissible.
+and neutral verification are false. Explicit output-level **1.60 V** commissioning fields
+(`commissioned_drive_limit_v` + `higher_drive_limit_authorized: true`) reflect completed
+**manual ADC1** testing on a secured BLDC for offline CES rehearsal. They are **not** a live
+physical authorization, and they do **not** authorize ADC2 braking.
 
 The example preserves the inspected operator's eight names and logical functions:
 
@@ -52,18 +54,17 @@ The example preserves the inspected operator's eight names and logical functions
 |---|---|---|
 | `Ramp Enable` | `rzxa_to_40_hold` | Existing `rzxa_ramp_hold.json`, unchanged |
 | `Ramp Disable` | `rzxa_down` | Existing `rzxa_ramp_down.json`, unchanged |
-| `Motor Gentle` | `motor_gentle` | `profiles/ces/motor_gentle.json` |
-| `Run Regen Test` | `regen_test` | `profiles/ces/motor_coast_compare.json` |
-| `Run Driving Cycle` | `driving_cycle` | `profiles/ces/motor_stop_go.json` |
-| `Run Efficiency Scan` | `efficiency_scan` | `profiles/ces/motor_three_level.json` |
+| `Motor Gentle` | `motor_gentle` | `profiles/ces/motor_gentle.json` (0.60 V) |
+| `Run Regen Test` | `regen_test` | Default Trial B `motor_regen_trial_b.json` (1.60 V); Trial A coast via `motor_coast_compare.json` |
+| `Run Driving Cycle` | `driving_cycle` | `profiles/ces/motor_stop_go.json` (0.60 / 1.00 / 1.60 V) |
+| `Run Efficiency Scan` | `efficiency_scan` | `profiles/ces/motor_three_level.json` (0.40 / 0.80 / 1.20 / 1.60 V) |
 | `RZ-XA Step Down` | `rzxa_voltage_down` | Existing `rzxa_voltage_down.json`, unchanged |
 | `RZ-XA Step Up` | `rzxa_voltage_up` | Existing `rzxa_voltage_up.json`, unchanged |
 
-These are operator-supplied channel strings, not inferred chassis identities. The earlier
-`ces-eight-button.json` remains a historical zero-neutral memory fixture; it is not the revised
-motor mapping. Do not copy its `RZXA Voltage Down/Up` example labels over the operator names.
-The staged four-point scan retains the historical `motor_three_level.json` basename for
-traceability; the staged JSON name and waveform identify **four** levels.
+These are operator-supplied channel strings, not inferred chassis identities.
+`examples/ces-eight-button.json` matches the same eight exact DOUT strings (including
+**RZ-XA Step Down/Up**). Do not overwrite gitignored local `dispatcher.json`. The scan retains
+the historical `motor_three_level.json` basename; the waveform is four levels through 1.60 V.
 
 ## Waveform commands and timing
 
@@ -73,7 +74,7 @@ to this output. All sequences begin and end at 0 V normal stop demand. Holds mai
 current demand, not measured wheel speed; the wheel may continue accelerating during them.
 Durations are nominal playback time, excluding startup, verification and I/O delays.
 
-### Motor Gentle — 10 seconds
+### Motor Gentle â€” 10 seconds
 
 | Time (s) | Demand / phase |
 |---|---|
@@ -84,60 +85,37 @@ Durations are nominal playback time, excluding startup, verification and I/O del
 The final ramp is a normal-stop request, not a separate low-positive-voltage brake command.
 Actual RPM, stopping time and electrical power must be measured; memory does not model them.
 
-### Run Regen Test — 18 seconds
+### Run Regen Test - Trial A coast / Trial B regen (~16-18 s)
 
-| Time (s) | Demand / phase |
-|---|---|
-| 0..3 | Ramp 0 -> 1.00 V; acceleration-demand measurement window |
-| 3..7 | Hold 1.00 V positive current demand; RPM need not be constant |
-| 7..8 | Ramp 1.00 -> 0 V; begin deceleration measurement window |
-| 8..18 | Hold 0 V; zero-demand deceleration/power observation, normal completion |
+Operator-tested ADC1 peak is **1.60 V**. Same DOUT selects Trial A or B by assignment profile.
 
-Checkpoints explicitly delimit `candidate_acceleration_window_begin/end` at 0/3 s and
-`candidate_deceleration_window_begin/end` at 7/18 s; zero-demand observation starts at 8 s.
-The intervening 3..7 s hold has its own current-demand checkpoint. These are command-time
-windows, not confirmation of the wheel's response. The button/filename is retained for
-compatibility; the deceleration window is **not labeled proven regeneration**. A 10 s
-observation window does not guarantee a stopped wheel or readiness for another run.
+**Trial A** (`motor_coast_compare.json`): accel 0->1.60 V / hold / ->0 V, ADC2 stays at **0 V**
+release, observe passive coast. **Trial B** (`motor_regen_trial_b.json`, CES default): same
+accel, then prompt provisional ADC2 brake (config `brake_max`; offline 0.20 V). Unmatched
+open-loop timing - **not** proven regeneration or matched start RPM. Live physical ADC2 remains
+fail-closed; do not infer ADC2 capability from ADC1 testing.
 
-### Run Driving Cycle — 24 seconds
+### Run Driving Cycle - ~23 seconds
 
-| Time (s) | Demand / phase |
-|---|---|
-| 0..2 / 2..4 | Ramp 0 -> 0.40 V / hold low positive current demand |
-| 4..5 / 5..7 | Ramp to 0 V / zero-demand deceleration observation |
-| 7..9 / 9..11 | Ramp 0 -> 0.60 V / hold medium positive current demand |
-| 11..12 / 12..14 | Ramp to 0 V / zero-demand deceleration observation |
-| 14..16 / 16..19 | Ramp 0 -> 1.00 V / hold higher positive current demand |
-| 19..20 / 20..24 | Ramp to 0 V / zero-demand observation; normal completion |
+Peaks **0.60 / 1.00 / 1.60 V** with distinct coast and provisional ADC2 brake intervals;
+brake released before every accel; drive-to-zero+verify before every brake. Three progressively
+higher current demands illustrate acceleration rates, not regulated RPM setpoints.
 
-Three progressively higher current demands illustrate different acceleration rates, not
-three regulated RPM setpoints. Short zero-demand intervals separate the events. Residual
-rotation can remain between bursts; equal initial speed and a complete stop are not assumed.
-
-### Run Efficiency Scan — 22 seconds
+### Run Efficiency Scan - ~22 seconds
 
 | Time (s) | Demand / phase |
 |---|---|
 | 0..1 / 1..5 | Ramp 0 -> 0.40 V / 4 s hold |
-| 5..6 / 6..10 | Ramp to 0.60 V / 4 s hold |
-| 10..11 / 11..15 | Ramp to 0.80 V / 4 s hold |
-| 15..16 / 16..20 | Ramp to 1.00 V / 4 s hold |
+| 5..6 / 6..10 | Ramp to 0.80 V / 4 s hold |
+| 10..11 / 11..15 | Ramp to 1.20 V / 4 s hold |
+| 15..16 / 16..20 | Ramp to 1.60 V / 4 s hold |
 | 20..22 | Ramp to 0 V; normal completion |
 
-The 0.40/0.60/0.80/1.00 V candidates are retained as equally spaced demand commands, with
-consistent 4 s observation windows, not predetermined speed points. There is no evidence
-in the repository establishing a quantitatively better set. Compare measured acceleration,
-current, power, RPM, offsets, saturation and repeatability before selecting alternative levels;
-do not infer improvement from voltage alone. Future 1.20/1.40/1.60 V candidates require separate
-staged authorization and revalidated timing, not an automatic profile change.
-
-A wider-spaced 0.40/0.80/1.20/1.60 V set is a possible future comparison, not an enabled
-waveform or a recommendation to raise a limit. It might separate acceleration rates more
-clearly, but if the wheel reaches RPM/current limits early, later demands may add no useful
-contrast and increase electrical risk. Comparable initial speed/load/temperature, a suitable
-load and independently measured current/torque are needed to judge that tradeoff. An
-unloaded sequential scan cannot establish equal initial conditions or mechanical efficiency.
+Levels **0.40 / 0.80 / 1.20 / 1.60 V** are enabled for offline CES after manual ADC1 upper-command
+authorization. ADC2 remains released for the entire scan. Compare measured acceleration,
+current, power and RPM before treating any level as a steady operating point; do not infer
+improvement from voltage alone. An unloaded sequential scan cannot establish equal initial
+conditions or mechanical efficiency.
 
 A positive-current hold need not settle to constant RPM. Compare time-aligned transient
 measurements, or use independently controlled load/feedback if steady-state points are needed.
@@ -149,13 +127,13 @@ Matrix Sampler calculations and visualization; no such Python analysis is added.
 
 | Setting | Existing local physical config | New memory rehearsal |
 |---|---|---|
-| Motor AOUT max | 0.40 V, unchanged | 1.00 V, explicitly authorized **fake** fixture |
+| Motor AOUT max | 0.40 V, unchanged | **1.60 V**, explicitly authorized offline after manual ADC1 test |
 | Legacy `neutral_aout_v` | 0 V normal-stop value; existing false acknowledgement unchanged | 0 V normal stop, `neutral_verified: false` |
 | Normal completion | Existing `return_neutral`, no live reauthorization | Verified 0 V demand readback, not verified stopped motion |
 | Cancel/fault/shutdown | Existing policies unchanged, not safety-qualified by this prompt | Attempt 0 V demand when backend is available; unknown on failure |
 | Supply range / gain | 0..0.50 V / 80 V/V, unchanged | Same, supply role only |
-| Physical higher levels | None newly enabled | No physical authorization |
-| 1.20 / 1.40 / 1.60 V | Proposed future levels only | Not requested by these profiles |
+| Physical higher levels | None newly enabled | No live physical authorization |
+| ADC2 / Braking Control | Live fail-closed | Offline coordination only; release 0 V; provisional demand not from ADC1 test |
 
 Previously, output-level higher-limit fields were mandatory for simulations but could be
 absent for a physical clamp above 0.40 V. This gap is closed: above 0.40 V, **both** transports
@@ -209,12 +187,13 @@ Before any physical profile can be enabled:
    including the shared-command limitation above. All hardware authorizations and the local
    `neutral_verified`/assignment hold remain unchanged. Do not re-enable them merely because
    the prior 0.3 V coast interpretation has been corrected.
-6. Commission the complete usable ADC span, then raise limits in reviewed stages (e.g. 0.40,
-   0.60, 0.80, 1.00 V, then potentially 1.20/1.40/1.60 V). Select only profiles entirely within
-   the authorized span: Gentle requires 0.60 V; regen, driving cycle and scan require 1.00 V.
-   Future 1.20/1.40/1.60 V commands remain planning-only. Existing validation already supports
-   explicit higher-limit stages, including 1.60 V; no limit bypass or relaxed bounds is added.
-   Revalidate current/voltage/thermal and regenerative protections at each stage.
+6. Commission the complete usable ADC span, then raise live limits in reviewed stages.
+   Offline CES examples now authorize peaks through **1.60 V** after completed manual ADC1
+   testing (`higher_drive_limit_authorized: true`). Select only profiles entirely within the
+   authorized span: Gentle 0.60 V; regen/driving cycle/scan up to 1.60 V. Live physical configs
+   remain at their local ceilings until separately reviewed. No limit bypass is added.
+   Revalidate current/voltage/thermal and regenerative protections at each stage. ADC2 remains
+   a separate commissioning workstream (release 0 V; live fail-closed).
 7. Use OXYGEN-native measurements/recording and independent motor inhibition throughout initial
    commissioning. Validate actual acceleration, settling, repeatability and deceleration; then
    review the staged profiles' live eligibility and exact channel mappings separately.
@@ -307,7 +286,8 @@ Source:
 
 Revised staged profile JSON:
 - `profiles/ces/motor_gentle.json`
-- `profiles/ces/motor_coast_compare.json`
+- `profiles/ces/motor_coast_compare.json` (Run Regen Test Trial A coast)
+- `profiles/ces/motor_regen_trial_b.json` (Run Regen Test Trial B regen, CES default)
 - `profiles/ces/motor_stop_go.json`
 - `profiles/ces/motor_three_level.json`
 

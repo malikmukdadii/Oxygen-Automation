@@ -1,14 +1,21 @@
 {
   "schema_version": 3,
-  "control": {"mode": "open_loop"},
+  "control": {
+    "mode": "open_loop"
+  },
   "transport": "memory",
   "live_control": {
     "enable_physical_aout": false,
     "enable_rzxa_output_toggle": false,
     "enable_real_rzxa_scpi": false,
-    "require_explicit_hardware_authorization": true
+    "require_explicit_hardware_authorization": true,
+    "enable_physical_brake": false
   },
-  "connection": {"host": "127.0.0.1", "port": 10001, "timeout_s": 0.5},
+  "connection": {
+    "host": "127.0.0.1",
+    "port": 10001,
+    "timeout_s": 0.5
+  },
   "outputs": {
     "rzxa_voltage_demand": {
       "role": "supply_voltage_demand",
@@ -17,7 +24,10 @@
       "expected_id": null,
       "channel_discovery_required": true,
       "binding": "supply_demand_fixture",
-      "authorization": {"simulation": true, "physical": false},
+      "authorization": {
+        "simulation": true,
+        "physical": false
+      },
       "mode": "ConstOutput",
       "source": "CONST0",
       "const_property": "TRION/SourceChannel_A_CONST/Const0",
@@ -45,7 +55,10 @@
       "expected_id": null,
       "channel_discovery_required": true,
       "binding": "motor_throttle_fixture",
-      "authorization": {"simulation": true, "physical": false},
+      "authorization": {
+        "simulation": true,
+        "physical": false
+      },
       "mode": "ConstOutput",
       "source": "CONST0",
       "const_property": "TRION/SourceChannel_A_CONST/Const0",
@@ -58,41 +71,139 @@
       "on_cancel": "return_neutral",
       "on_fault": "return_neutral",
       "on_shutdown": "return_neutral"
+    },
+    "vesc_brake": {
+      "role": "motor_brake",
+      "channel": null,
+      "display_name": "Braking Control (offline fixture)",
+      "expected_id": null,
+      "channel_discovery_required": true,
+      "binding": "motor_brake_fixture",
+      "authorization": {
+        "simulation": true,
+        "physical": false
+      },
+      "mode": "ConstOutput",
+      "source": "CONST0",
+      "const_property": "TRION/SourceChannel_A_CONST/Const0",
+      "min_aout_v": 0.0,
+      "max_aout_v": 0.4,
+      "brake_min_aout_v": 0.0,
+      "brake_max_aout_v": 0.4,
+      "brake_release_aout_v": 0.0,
+      "brake_release_verified": false,
+      "completion_policy": "return_release",
+      "on_cancel": "return_release",
+      "on_fault": "return_release",
+      "on_shutdown": "return_release"
     }
   },
-  "timing": {"poll_ms": 50, "max_trigger_gap_ms": 250, "interval_ms": 100, "max_lateness_ms": 250},
+  "timing": {
+    "poll_ms": 50,
+    "max_trigger_gap_ms": 250,
+    "interval_ms": 100,
+    "max_lateness_ms": 250
+  },
   "measurements": {},
   "interlocks": {
     "motor_supply_demand_v": 0.5,
     "require_supply_demand_before_motor": true,
     "supply_down_requires_motor_neutral": true,
     "one_active_profile_global": true,
-    "external_emergency_stop_required_for_live": true
+    "external_emergency_stop_required_for_live": true,
+    "drive_brake_mutual_exclusion": true,
+    "zero_drive_before_brake": true,
+    "release_brake_before_drive": true
   },
-  "recording": {"enabled": false, "markers": true},
-  "instruments": {"rzxa": {"adapter": "disabled", "enable_output_control": false}},
+  "recording": {
+    "enabled": false,
+    "markers": true
+  },
+  "instruments": {
+    "rzxa": {
+      "adapter": "disabled",
+      "enable_output_control": false
+    }
+  },
   "assignments": [
-    {"name": "rzxa_to_40_hold", "enabled": true, "trigger": "DO 3/1 Sim", "output": "rzxa_voltage_demand", "profile": "../profiles/rzxa_ramp_hold.json"},
-    {"name": "rzxa_down", "enabled": true, "trigger": "DO 3/2 Sim", "output": "rzxa_voltage_demand", "profile": "../profiles/rzxa_ramp_down.json"},
-    {"name": "rzxa_steps", "enabled": true, "trigger": "DO 3/3 Sim", "output": "rzxa_voltage_demand", "profile": "../profiles/rzxa_steps.json"},
-    {"name": "motor_gentle", "enabled": true, "trigger": "DO 3/4 Sim", "output": "vesc_throttle", "profile": "../profiles/motor_gentle.json"},
-    {"name": "motor_stop_go", "enabled": true, "trigger": "DO 3/5 Sim", "output": "vesc_throttle", "profile": "../profiles/motor_stop_go.json"},
-    {"name": "motor_cruise", "enabled": true, "trigger": "DO 3/6 Sim", "output": "vesc_throttle", "profile": "../profiles/motor_cruise.json"}
+    {
+      "name": "rzxa_to_40_hold",
+      "enabled": true,
+      "trigger": "DO 3/1 Sim",
+      "output": "rzxa_voltage_demand",
+      "profile": "../profiles/rzxa_ramp_hold.json"
+    },
+    {
+      "name": "rzxa_down",
+      "enabled": true,
+      "trigger": "DO 3/2 Sim",
+      "output": "rzxa_voltage_demand",
+      "profile": "../profiles/rzxa_ramp_down.json"
+    },
+    {
+      "name": "rzxa_steps",
+      "enabled": true,
+      "trigger": "DO 3/3 Sim",
+      "output": "rzxa_voltage_demand",
+      "profile": "../profiles/rzxa_steps.json"
+    },
+    {
+      "name": "motor_gentle",
+      "enabled": true,
+      "trigger": "DO 3/4 Sim",
+      "output": "vesc_throttle",
+      "profile": "../profiles/motor_gentle.json"
+    },
+    {
+      "name": "motor_stop_go",
+      "enabled": true,
+      "trigger": "DO 3/5 Sim",
+      "output": "vesc_throttle",
+      "profile": "../profiles/motor_stop_go.json"
+    },
+    {
+      "name": "motor_cruise",
+      "enabled": true,
+      "trigger": "DO 3/6 Sim",
+      "output": "vesc_throttle",
+      "profile": "../profiles/motor_cruise.json"
+    }
   ],
   "simulation": {
     "namespace": "FAKE_IN_PROCESS_ONLY",
     "outputs": {
       "supply_demand_fixture": {
-        "name": "FAKE supply analog demand",
+        "name": "Takasago Voltage Control",
         "id": "101",
-        "mode": "ConstOutput", "source": "CONST0", "property": "TRION/SourceChannel_A_CONST/Const0",
-        "unit": "V", "min_v": 0.0, "max_v": 0.5, "initial_v": 0.0
+        "mode": "ConstOutput",
+        "source": "CONST0",
+        "property": "TRION/SourceChannel_A_CONST/Const0",
+        "unit": "V",
+        "min_v": 0.0,
+        "max_v": 0.5,
+        "initial_v": 0.0
       },
       "motor_throttle_fixture": {
-        "name": "FAKE motor throttle",
+        "name": "Drive Control",
         "id": "102",
-        "mode": "ConstOutput", "source": "CONST0", "property": "TRION/SourceChannel_A_CONST/Const0",
-        "unit": "V", "min_v": 0.0, "max_v": 0.4, "initial_v": 0.0
+        "mode": "ConstOutput",
+        "source": "CONST0",
+        "property": "TRION/SourceChannel_A_CONST/Const0",
+        "unit": "V",
+        "min_v": 0.0,
+        "max_v": 0.4,
+        "initial_v": 0.0
+      },
+      "motor_brake_fixture": {
+        "name": "Braking Control",
+        "id": "103",
+        "mode": "ConstOutput",
+        "source": "CONST0",
+        "property": "TRION/SourceChannel_A_CONST/Const0",
+        "unit": "V",
+        "min_v": 0.0,
+        "max_v": 0.4,
+        "initial_v": 0.0
       }
     },
     "sample_interval_s": 0.1,

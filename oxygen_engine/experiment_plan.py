@@ -5,11 +5,12 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .errors import ConfigError
-from .schema import DispatcherConfig, exact_name, keys, number, read_json
+from .schema import BRAKE, DispatcherConfig, exact_name, keys, number, read_json
 
 SUPPLY = 'rzxa_voltage_demand'
 MOTOR = 'vesc_throttle'
 NAMES = {SUPPLY: 'Takasago Voltage Control', MOTOR: 'Drive Control'}
+ALLOWED_EXPERIMENT_ROLES = frozenset(NAMES) | {BRAKE}
 NUMERIC_UNITS = {'dc_bus_voltage': 'V', 'dc_current': 'A', 'dc_power': 'W', 'ac_power': 'W',
                  'erpm': 'rpm', 'motor_current': 'A', 'acquisition_time_s': 's',
                  'vesc_telemetry_age_s': 's', 'matrix_sample_count': ''}
@@ -42,11 +43,17 @@ def load_experiment(path, config):
         raise ConfigError('Expected experiment_version 1 (alongside unchanged V3 dispatcher bindings)')
     exact_name(raw.get('name'), 'experiment name')
     kind = raw.get('type')
-    if kind not in {'grid', 'dynamic'} or not config.open_loop or set(config.raw['outputs']) != set(NAMES):
-        raise ConfigError('Experiments require grid/dynamic and the two existing open-loop V3 outputs')
+    active = set(config.raw['outputs'])
+    if (kind not in {'grid', 'dynamic'} or not config.open_loop or
+            not set(NAMES).issubset(active) or active - ALLOWED_EXPERIMENT_ROLES):
+        raise ConfigError(
+            'Experiments require grid/dynamic open-loop V3 outputs with '
+            'rzxa_voltage_demand + vesc_throttle (optional vesc_brake is ignored)')
     for role, name in NAMES.items():
         if config.physical and config.raw['outputs'][role]['channel'] != name:
             raise ConfigError(f'{role}: preserve exact channel {name!r}')
+    if BRAKE in active and config.physical:
+        raise ConfigError('Experiments do not authorize physical vesc_brake / Braking Control')
     gain = config.raw['outputs'][SUPPLY]['mapping']['gain_bus_v_per_aout_v']
     if gain != 80 or (config.physical and config.raw['outputs'][SUPPLY]['mapping']['verified'] is not True):
         raise ConfigError('Experiment requires verified 80 V/V supply scaling for physical execution')

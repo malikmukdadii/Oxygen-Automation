@@ -145,6 +145,36 @@ def motor_role_keys() -> set[str]:
     }
 
 
+def brake_role_keys() -> set[str]:
+    return {
+        'role', 'channel', 'display_name', 'expected_id', 'channel_discovery_required', 'binding',
+        'authorization', 'mode', 'source', 'const_property', 'min_aout_v', 'max_aout_v',
+        'brake_release_aout_v', 'brake_min_aout_v', 'brake_max_aout_v', 'brake_release_verified',
+        'completion_policy', 'on_cancel', 'on_fault', 'on_shutdown',
+    }
+
+
+def authorize_dispatcher_brake_range(spec: dict, *, physical: bool) -> float:
+    """Validate independent brake AOUT range/release. Live physical brake stays fail-closed."""
+    release = number(spec.get('brake_release_aout_v'), 'brake_release_aout_v', 0, ABSOLUTE_AOUT_MAX_V)
+    brake_min = number(spec.get('brake_min_aout_v'), 'brake_min_aout_v', 0, ABSOLUTE_AOUT_MAX_V)
+    brake_max = number(spec.get('brake_max_aout_v'), 'brake_max_aout_v', 0.001, ABSOLUTE_AOUT_MAX_V)
+    min_v = number(spec.get('min_aout_v'), 'minimum', 0, ABSOLUTE_AOUT_MAX_V)
+    max_v = number(spec.get('max_aout_v'), 'maximum', 0.001, ABSOLUTE_AOUT_MAX_V)
+    if abs(brake_min - min_v) > 1e-12 or abs(brake_max - max_v) > 1e-12:
+        raise ConfigError('brake_min/max_aout_v must match min_aout_v/max_aout_v')
+    if not brake_min <= release <= brake_max:
+        raise ConfigError('brake_release_aout_v must lie within brake_min/max_aout_v')
+    if type(spec.get('brake_release_verified')) is not bool:
+        raise ConfigError('brake_release_verified must be Boolean')
+    if physical:
+        if spec.get('brake_release_verified') is not True:
+            raise ConfigError('Physical vesc_brake requires brake_release_verified true after calibration')
+    elif spec.get('brake_release_verified') is not False:
+        raise ConfigError('Simulated vesc_brake brake_release_verified must remain false')
+    return max_v
+
+
 def assert_role_is_motor(role: str) -> None:
     if role != MOTOR:
         raise ConfigError('Drive limit commissioning applies only to vesc_throttle')
