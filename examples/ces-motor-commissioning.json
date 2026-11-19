@@ -65,7 +65,7 @@
     "vesc_brake": {
       "role": "motor_brake",
       "channel": null,
-      "display_name": "Braking Control FAKE; release 0 V; provisional offline brake demand; live ADC2 fail-closed",
+      "display_name": "Braking Control FAKE; release 0 V; 0..3.3 V ADC2 input span, requested intensity comes from assignment parameters",
       "expected_id": null,
       "channel_discovery_required": true,
       "binding": "motor_brake_fixture",
@@ -74,9 +74,9 @@
       "source": "CONST0",
       "const_property": "TRION/SourceChannel_A_CONST/Const0",
       "min_aout_v": 0.0,
-      "max_aout_v": 0.4,
+      "max_aout_v": 3.3,
       "brake_min_aout_v": 0.0,
-      "brake_max_aout_v": 0.4,
+      "brake_max_aout_v": 3.3,
       "brake_release_aout_v": 0.0,
       "brake_release_verified": false,
       "completion_policy": "return_release",
@@ -104,8 +104,8 @@
     {"name": "rzxa_to_40_hold", "trigger": "Ramp Enable", "output": "rzxa_voltage_demand", "profile": "../profiles/rzxa_ramp_hold.json"},
     {"name": "rzxa_down", "trigger": "Ramp Disable", "output": "rzxa_voltage_demand", "profile": "../profiles/rzxa_ramp_down.json"},
     {"name": "motor_gentle", "trigger": "Motor Gentle", "output": "vesc_throttle", "profile": "../profiles/ces/motor_gentle.json"},
-    {"name": "regen_test", "trigger": "Run Regen Test", "output": "vesc_throttle", "profile": "../profiles/ces/motor_regen_trial_b.json"},
-    {"name": "driving_cycle", "trigger": "Run Driving Cycle", "output": "vesc_throttle", "profile": "../profiles/ces/motor_stop_go.json"},
+    {"name": "regen_test", "trigger": "Run Regen Test", "output": "vesc_throttle", "profile": "../profiles/ces/motor_regen_trial_b.json", "parameters": {"brake_target_v": 0.20}},
+    {"name": "driving_cycle", "trigger": "Run Driving Cycle", "output": "vesc_throttle", "profile": "../profiles/ces/motor_stop_go.json", "parameters": {"brake_light_v": 0.15, "brake_heavy_v": 0.20}},
     {"name": "efficiency_scan", "trigger": "Run Efficiency Scan", "output": "vesc_throttle", "profile": "../profiles/ces/motor_three_level.json"},
     {"name": "rzxa_voltage_down", "trigger": "RZ-XA Step Down", "output": "rzxa_voltage_demand", "profile": "../profiles/rzxa_voltage_down.json"},
     {"name": "rzxa_voltage_up", "trigger": "RZ-XA Step Up", "output": "rzxa_voltage_demand", "profile": "../profiles/rzxa_voltage_up.json"}
@@ -126,7 +126,7 @@
       "motor_brake_fixture": {
         "name": "Braking Control", "id": "103",
         "mode": "ConstOutput", "source": "CONST0", "property": "TRION/SourceChannel_A_CONST/Const0",
-        "unit": "V", "min_v": 0.0, "max_v": 0.4, "initial_v": 0.0
+        "unit": "V", "min_v": 0.0, "max_v": 3.3, "initial_v": 0.0
       }
     },
     "sample_interval_s": 0.1,

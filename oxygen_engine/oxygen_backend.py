@@ -404,7 +404,8 @@ class OxygenBackend:
             spec = self.config.raw['outputs'][role]
             value = number(value, 'demand', spec['min_aout_v'], spec['max_aout_v'])
             if (self.physical and not self.open_loop and
-                    not (role == 'vesc_throttle' and value == spec['neutral_aout_v'])):
+                    not ((role == 'vesc_throttle' and value == spec['neutral_aout_v']) or
+                         (role == 'vesc_brake' and value == spec['brake_release_aout_v']))):
                 ready = self.measure('supply_external_ready')
                 age_limit = self.config.raw['interlocks']['max_feedback_age_s']
                 if ready.value is not True or not 0 <= self.clock() - ready.sampled_at <= age_limit:

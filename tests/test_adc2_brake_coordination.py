@@ -80,7 +80,7 @@ def test_ces_eight_button_loads_with_braking_control_fixture():
     assert config.raw['outputs'][MOTOR]['higher_drive_limit_authorized'] is True
 
 
-def test_physical_brake_authorization_rejected(tmp_path):
+def test_physical_brake_requires_explicit_enable(tmp_path):
     raw = json.loads((ROOT / 'examples' / 'physical-dual.json').read_text(encoding='utf-8-sig'))
     raw['outputs'][BRAKE] = {
         'role': 'motor_brake',
@@ -114,18 +114,18 @@ def test_physical_brake_authorization_rejected(tmp_path):
         assignment['profile'] = str((ROOT / 'examples' / assignment['profile']).resolve())
     path = tmp_path / 'bad.json'
     path.write_text(json.dumps(raw), encoding='utf-8')
-    with pytest.raises(ConfigError, match='Physical vesc_brake authorization is disabled'):
+    with pytest.raises(ConfigError, match='enable_physical_brake'):
         load_dispatcher_config(path)
 
 
-def test_enable_physical_brake_rejected(tmp_path):
+def test_enable_physical_brake_rejected_for_memory(tmp_path):
     raw = json.loads(CES.read_text(encoding='utf-8-sig'))
     raw['live_control']['enable_physical_brake'] = True
     for assignment in raw['assignments']:
         assignment['profile'] = str((CES.parent / assignment['profile']).resolve())
     path = tmp_path / 'live-brake.json'
     path.write_text(json.dumps(raw), encoding='utf-8')
-    with pytest.raises(ConfigError, match='Live physical braking remains disabled'):
+    with pytest.raises(ConfigError, match='Simulated/memory live actuation flags must be false'):
         load_dispatcher_config(path)
 
 
@@ -261,6 +261,7 @@ def test_production_coordinated_timeline_runs_without_boundary_injection(tmp_pat
         'trigger': 'Run Regen Test',
         'output': 'vesc_throttle',
         'profile': str((ROOT / 'profiles/ces/motor_regen_trial_b.json').resolve()),
+        'parameters': {'brake_target_v': .2},
     }]
     path = tmp_path / 'prod-timeline.json'
     path.write_text(json.dumps(raw), encoding='utf-8')

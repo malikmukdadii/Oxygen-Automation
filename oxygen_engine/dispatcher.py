@@ -28,7 +28,7 @@ BRAKE = BRAKE
 def configuration_summary(config):
     enabled, disabled = [], []
     for assignment in config.raw['assignments']:
-        record = {key: assignment.get(key) for key in ('name', 'trigger', 'output', 'profile')}
+        record = {key: assignment.get(key) for key in ('name', 'trigger', 'output', 'profile', 'parameters')}
         if assignment.get('enabled', True):
             profile = config.profiles[assignment['name']]
             record.update(profile=str(profile.path), completion=profile.completion,

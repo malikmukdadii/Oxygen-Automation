@@ -155,7 +155,7 @@ def brake_role_keys() -> set[str]:
 
 
 def authorize_dispatcher_brake_range(spec: dict, *, physical: bool) -> float:
-    """Validate independent brake AOUT range/release. Live physical brake stays fail-closed."""
+    """Validate the operator-configured brake range and explicit release confirmation."""
     release = number(spec.get('brake_release_aout_v'), 'brake_release_aout_v', 0, ABSOLUTE_AOUT_MAX_V)
     brake_min = number(spec.get('brake_min_aout_v'), 'brake_min_aout_v', 0, ABSOLUTE_AOUT_MAX_V)
     brake_max = number(spec.get('brake_max_aout_v'), 'brake_max_aout_v', 0.001, ABSOLUTE_AOUT_MAX_V)

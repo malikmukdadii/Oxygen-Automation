@@ -1,7 +1,7 @@
 {
   "schema_version": 3,
   "name": "ces_motor_regen_trial_b",
-  "description": "Run Regen Test Trial B (regen rehearsal, unmatched open-loop timing): same ADC1 accel to 1.60 V, drive-to-zero+verify, then prompt provisional ADC2 brake (config brake_max). Does not claim matched RPM or recovered energy without measured feedback. Live physical ADC2 remains fail-closed until separately calibrated; brake release is operator-verified 0 V.",
+  "description": "Run Regen Test Trial B (unmatched open-loop timing): ADC1 accel to 1.60 V, drive-to-zero+verify, then prompt ADC2 brake using assignment parameter brake_target_v, independent of the configured output ceiling. Does not claim matched RPM or recovered energy without measured feedback. Physical use requires explicit output authorization and brake-release confirmation.",
   "output": "vesc_throttle",
   "outputs": ["vesc_throttle", "vesc_brake"],
   "timeout_s": 40,
@@ -20,7 +20,7 @@
     {"type": "return_neutral", "params": {"channel": "vesc_throttle"}},
     {"type": "checkpoint", "params": {"name": "trial_b_regen_brake_prompt_begin"}},
     {"type": "hold", "params": {"duration_s": 0.5}},
-    {"type": "ramp_aout", "params": {"channel": "vesc_brake", "target": 0.2, "duration_s": 1.0}},
+    {"type": "ramp_aout", "params": {"channel": "vesc_brake", "target": {"parameter": "brake_target_v"}, "duration_s": 1.0}},
     {"type": "checkpoint", "params": {"name": "trial_b_regen_brake_hold"}},
     {"type": "hold", "params": {"duration_s": 4.0}},
     {"type": "ramp_aout", "params": {"channel": "vesc_brake", "target": 0.0, "duration_s": 1.0}},

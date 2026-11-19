@@ -142,7 +142,8 @@ def _safe_level(role: str, spec: dict) -> float:
     return float(spec.get('neutral_aout_v', spec.get('startup_aout_v', 0)))
 
 
-def load_profile(path, output, spec, *, open_loop: bool, configured_outputs: dict | None = None):
+def load_profile(path, output, spec, *, open_loop: bool, configured_outputs: dict | None = None,
+                 parameters: dict | None = None):
     path = Path(path).resolve()
     raw = read_json(path)
     keys(raw, {'schema_version', 'name', 'description', 'output', 'outputs', 'timeout_s',
@@ -193,6 +194,35 @@ def load_profile(path, output, spec, *, open_loop: bool, configured_outputs: dic
     steps = raw.get('steps')
     if not isinstance(steps, list) or not 1 <= len(steps) <= 120:
         raise ConfigError('Provide 1..120 profile steps')
+    parameters = {} if parameters is None else parameters
+    if not isinstance(parameters, dict):
+        raise ConfigError('Assignment parameters must be an object of finite JSON numbers')
+    for name, value in parameters.items():
+        exact_name(name, 'parameter name')
+        if type(value) not in (int, float):
+            raise ConfigError(f'Parameter {name!r} must be a finite JSON number')
+        try:
+            finite_number(value, f'Parameter {name!r}')
+        except (ValueError, OverflowError) as exc:
+            raise ConfigError(f'Parameter {name!r} must be a finite JSON number') from exc
+    for step in steps:
+        if not isinstance(step, dict) or step.get('type') != 'ramp_aout':
+            continue
+        params = step.get('params', {})
+        if not isinstance(params, dict) or not isinstance(params.get('target'), dict):
+            continue
+        reference = params['target']
+        keys(reference, {'parameter'}, 'ramp target parameter reference')
+        name = exact_name(reference.get('parameter'), 'ramp target parameter name')
+        if name not in parameters:
+            raise ConfigError(f'{path}: missing assignment parameter {name!r}')
+        value = parameters[name]
+        channel = params.get('channel')
+        if isinstance(channel, str) and channel in configured:
+            channel_spec = configured[channel]
+            number(value, f'Parameter {name!r} target for {channel}',
+                   channel_spec['min_aout_v'], channel_spec['max_aout_v'])
+        params['target'] = value
     allowed_pre = OPEN_LOOP_PRECONDITIONS if open_loop else CLOSED_LOOP_PRECONDITIONS
     allowed_req = REQUIRES_OPEN if open_loop else REQUIRES_CLOSED
     elapsed, started, timed = 0.0, False, 0
@@ -342,11 +372,7 @@ def _validate_outputs(raw, *, physical: bool, open_loop: bool):
         if not isinstance(permission, dict) or set(permission) != {'simulation', 'physical'}:
             raise ConfigError('Each output requires authorization.simulation and authorization.physical')
         role_physical = permission.get('physical') is True
-        if role == BRAKE and role_physical:
-            # Fail-closed: live braking stays disabled even if other AOUT roles are physical.
-            raise ConfigError(
-                'Physical vesc_brake authorization is disabled; live braking is not enabled')
-        if physical and role != BRAKE:
+        if physical:
             if permission['simulation'] is not False or permission['physical'] is not True:
                 raise ConfigError('Physical outputs require simulation false / physical true')
             if not isinstance(spec.get('channel'), str) or not spec['channel'].strip():
@@ -371,7 +397,7 @@ def _validate_outputs(raw, *, physical: bool, open_loop: bool):
             ids.add(cid)
         # Operator-configured max is authoritative within the absolute ConstOutput span.
         if role == BRAKE:
-            authorize_dispatcher_brake_range(spec, physical=False)
+            authorize_dispatcher_brake_range(spec, physical=physical and role_physical)
         else:
             number(spec.get('min_aout_v'), 'minimum', 0, 0)
         if role == MOTOR:
@@ -458,11 +484,9 @@ def load_dispatcher_config(path) -> DispatcherConfig:
         raise ConfigError('transport must be memory or oxygen_scpi')
     flags = raw.get('live_control', {})
     keys(flags, LIVE_FLAGS, 'live_control')
-    # Backward compatible default: live braking stays off unless an explicit future enable is reviewed.
+    # Existing configurations without a brake role need no new enable flag.
     flags.setdefault('enable_physical_brake', False)
     raw['live_control'] = flags
-    if flags.get('enable_physical_brake') is True:
-        raise ConfigError('Live physical braking remains disabled until separately commissioned')
     physical = False
     outputs_probe = raw.get('outputs')
     if isinstance(outputs_probe, dict):
@@ -471,16 +495,19 @@ def load_dispatcher_config(path) -> DispatcherConfig:
             and s['authorization'].get('physical') is True for s in outputs_probe.values()
         )
     if physical:
+        if transport != 'oxygen_scpi':
+            raise ConfigError('Physical output authorization requires transport oxygen_scpi')
+        active = set(outputs_probe)
         expected = {
-            'enable_physical_aout': True, 'enable_physical_brake': False,
+            'enable_physical_aout': True, 'enable_physical_brake': BRAKE in active,
             'enable_rzxa_output_toggle': False, 'enable_real_rzxa_scpi': False,
             'require_explicit_hardware_authorization': True,
         }
         if any(flags.get(k) is not v for k, v in expected.items()):
             raise ConfigError(
-                'Physical live_control enables AOUT only; RZ-XA SCPI and live braking stay disabled')
+                'Physical live_control requires AOUT enable and enable_physical_brake true '
+                'exactly when vesc_brake is configured; RZ-XA SCPI/toggling remain disabled')
         acks = raw.get('hardware_authorization', {})
-        active = set(outputs_probe) if isinstance(outputs_probe, dict) else set()
         required_acks = {
             'wiring_verified', 'external_emergency_stop_verified', 'external_enable_control_verified',
         }
@@ -488,7 +515,8 @@ def load_dispatcher_config(path) -> DispatcherConfig:
             required_acks.add('supply_mapping_verified')
         if MOTOR in active:
             required_acks.add('motor_neutral_verified')
-        # brake_release_verified is reserved for a future live-brake authorization path.
+        if BRAKE in active:
+            required_acks.add('brake_release_verified')
         keys(acks, HARDWARE_ACKNOWLEDGEMENTS, 'hardware_authorization')
         if set(acks) != required_acks or any(acks.get(k) is not True for k in required_acks):
             raise ConfigError(
@@ -721,7 +749,7 @@ def load_dispatcher_config(path) -> DispatcherConfig:
     sensor_names = {m.get('channel') for m in measurements.values() if isinstance(m, dict) and m.get('channel')}
     output_names = {s.get('channel') for s in outputs.values() if s.get('channel')}
     for assignment in assignments:
-        keys(assignment, {'name', 'enabled', 'trigger', 'output', 'profile'}, 'assignment')
+        keys(assignment, {'name', 'enabled', 'trigger', 'output', 'profile', 'parameters'}, 'assignment')
         if type(assignment.get('enabled', True)) is not bool:
             raise ConfigError('Assignment enabled must be Boolean')
         if not assignment.get('enabled', True):
@@ -734,8 +762,12 @@ def load_dispatcher_config(path) -> DispatcherConfig:
         if output not in outputs:
             raise ConfigError('Unknown output role')
         filename = exact_name(assignment.get('profile'), 'profile path')
+        parameters = assignment.get('parameters', {})
+        if not isinstance(parameters, dict):
+            raise ConfigError(f'{name}: assignment parameters must be an object of finite JSON numbers')
         profile = load_profile(
-            path.parent / filename, output, outputs[output], open_loop=open_loop, configured_outputs=outputs)
+            path.parent / filename, output, outputs[output], open_loop=open_loop,
+            configured_outputs=outputs, parameters=parameters)
         if any(step['type'] == 'relative_aout_step' for step in profile.steps):
             if physical and interlocks.get('supply_demand_grid_commissioned') is not True:
                 raise ConfigError('Physical relative steps require supply_demand_grid_commissioned true after separate review')

@@ -1,52 +1,49 @@
 # CES motor profiles: current-demand acceleration and normal stopping
 
-## Status: memory rehearsal only, not a physical authorization
+## Status: operator-authorized physical ADC1/ADC2 on the existing V3 dispatcher
 
-This revision corrects the interpretation introduced in commit `5b317d4`. `Drive Control`
-(AO2/1, VESC ADC1) commands a controller in **current-control mode**, not regulated-speed
-mode. Updated physical observations establish 0 V as the intended **normal stop demand**.
-Approximately 0.3 V is low positive current/torque demand: the wheel can accelerate slowly
-to nearly maximum RPM. Approximately 0.6..1.0 V produces greater demand and faster
-acceleration; 1.6 V accelerated much faster but reached approximately the same eventual RPM.
-These observations do not calibrate voltage to amperes, torque or RPM, or verify the entire
-electrical operating range. A constant positive demand can continue accelerating the wheel;
-it is not a constant-speed command or evidence of a stable operating point.
+Following PR #3 (`19c5fb8`), physical `vesc_brake` authorization is functional; it is no longer
+unconditionally rejected. No new dispatcher, transport, current-setting control or telemetry
+system is introduced. Operator-confirmed mapping is `Current No Reverse Brake ADC2`:
 
-**0.3 V is not coast, and 0.1..0.2 V is not a demonstrated regenerative-braking region.**
-Substantial deceleration at 0 V does not prove regeneration or establish a safe fault,
-communication-loss or emergency-stop response. No VESC ADC-configuration export or verified
-numeric motor-current, battery-current or regenerative-current limits were found in the
-repository. Experiment abort thresholds and synthetic feedback are not controller settings.
+- `Drive Control`, AO2/1, ADC1: 0 V is zero drive demand; the wheel coasts with ADC2 released.
+  Positive drive demand commands current/torque, not regulated speed. Immediate commands up
+  to 1.6 V were manually tested on the secured motor.
+- `Braking Control`, AO2/2, ADC2: 0 V releases braking. Nonzero requests are controlled by
+  assignment parameters, independently of ADC1 and the configured ADC2 input span.
+- `Takasago Voltage Control`, AO2/3: unchanged RZ-XA demand, 80 V/V and 0..0.5 V AOUT.
 
-All four redesigned replacements are staged under `profiles/ces/`, using the actual schema-3
-`set_aout`, `ramp_aout`, `hold`, `checkpoint`, and `return_neutral` steps. They start and
-complete at 0 V, with no positive-voltage coast/brake plateaus. The obsolete memory-only
-nonzero-neutral exception is removed. The existing JSON identifiers `neutral_aout_v`,
-`motor_neutral` and `return_neutral` are retained for compatibility; here they mean a
-zero-demand command/readback, not verified stopped motion, coast or electrical safety.
-Historical root motor waveforms remain unchanged for compatibility, with corrected warnings.
-No RZ-XA profile, 80 V/V supply mapping or 0..0.5 V supply range is modified.
+Existing VESC controller-current settings remain unchanged. Voltage is not a calibrated
+measurement of amperes, torque or RPM. Constant positive demand need not produce constant
+speed. Neither speed reduction nor an ADC2 command proves regenerated energy.
 
-The local, gitignored `dispatcher.json` is **not modified or overwritten by this revision**.
-At review it retained all eight trigger strings, assignment names and profile paths, a 0.40 V
-ceiling and 0 V normal-stop value; its four motor assignments were disabled and
-`neutral_verified` was false following the prior review. Those settings remain unchanged.
-Although the reason for treating 0 V as an incorrect normal stop is withdrawn, the new
-observations do not authorize a live restart or a safe fault response. Existing validation
-continues to block physical dispatch, including supply dispatch with this motor role present.
-Do not bypass that hold by changing acknowledgements, removing the motor role or disabling
-interlocks. Independently enforced inhibition/protection and explicit commissioning review
-are still required. No local flag is cleared or enabled automatically.
+The legacy schema identifiers `neutral_aout_v`, `motor_neutral` and `return_neutral` retain
+their existing meaning as zero-drive command/readback, not proof of stationary motion or
+an emergency-stop function. The coordinated profiles additionally return ADC2 to release.
+Waveform timing, drive peaks, transition ordering, mutual exclusion and global ownership
+are preserved. Only the requested ADC2 ramp targets now use assignment parameter references.
 
-## Offline configuration and unchanged button identities
+The local, gitignored `dispatcher.json` is **not modified, replaced or enabled**. The operator
+will install their physical configuration manually. Configured maxima and existing explicit
+authorizations are authoritative; this change adds no lower software ceiling or hidden
+commissioning gate. Output-demand readback remains distinct from physical bus/regen safety.
 
-`examples/ces-motor-commissioning.json` is a new memory-only rehearsal config, not the live
-operator file. It uses fake in-process AOUT fixtures, an initial supply demand of 0.50 V and
-an initial motor demand of 0 V normal stop. All physical actuation flags are false; both mapping
-and neutral verification are false. Explicit output-level **1.60 V** commissioning fields
-(`commissioned_drive_limit_v` + `higher_drive_limit_authorized: true`) reflect completed
-**manual ADC1** testing on a secured BLDC for offline CES rehearsal. They are **not** a live
-physical authorization, and they do **not** authorize ADC2 braking.
+## Configuration and unchanged button identities
+
+`examples/ces-physical-three-output.json` shows the physical three-output configuration.
+It enables physical AOUT and brake control, authorizes all three exact physical channel
+names, retains **1.60 V** drive authorization and specifies a **0..3.3 V** ADC2 input-command
+span. Its true hardware acknowledgement fields represent explicit operator confirmations,
+not feedback from Python. Review those existing confirmations for the actual installation.
+
+`examples/ces-motor-commissioning.json` and `examples/ces-eight-button.json` remain memory-only
+rehearsals with all physical enable/authorization flags false. Their brake input-command span
+also is 0..3.3 V. No memory fixture is used as evidence of actual regenerative current.
+
+Profile paths are relative to the configuration file: the examples use `../profiles/...`.
+When manually transferring an example to root-level `dispatcher.json`, use `profiles/...`
+instead. Do not copy over the operator file automatically. Parameters are read at startup;
+restart the dispatcher to load edits rather than expecting live hot-reload.
 
 The example preserves the inspected operator's eight names and logical functions:
 
@@ -66,12 +63,36 @@ These are operator-supplied channel strings, not inferred chassis identities.
 **RZ-XA Step Down/Up**). Do not overwrite gitignored local `dispatcher.json`. The scan retains
 the historical `motor_three_level.json` basename; the waveform is four levels through 1.60 V.
 
+## Brake intensity: assignment parameters, not output ceilings
+
+Optional assignment `parameters` is an object of finite JSON numbers. The parameterized
+`ramp_aout` target syntax is `{"parameter": "brake_target_v"}`. Resolution occurs before
+waveform range, ordering, rate and completion validation; compilation sees numeric targets.
+Existing numeric targets and schema version 3 continue working unchanged.
+
+| Assignment | Editable parameters in `dispatcher.json` | Example request |
+|---|---|---|
+| `regen_test`, Trial B | `brake_target_v` | 0.20 V |
+| `driving_cycle` | `brake_light_v`, `brake_heavy_v` | 0.15 V, 0.20 V |
+
+For example, set `parameters` to `{"brake_target_v": 0.20}` on the existing regen assignment,
+or `{"brake_light_v": 0.15, "brake_heavy_v": 0.20}` on the existing driving-cycle assignment.
+To tune braking, edit only these numbers, not the profiles or output ceiling. Preview lists
+the selected parameters. No missing value is silently defaulted, clamped or replaced by the
+maximum. Missing references, strings, Booleans, nulls, nonfinite numbers and out-of-range
+resolved targets produce explicit configuration errors before connection/writes.
+
+`max_aout_v` / `brake_max_aout_v` specify the permitted ADC2 command range, **not the requested
+brake intensity**. The example's 3.3 V upper bound reflects the configured analog input span;
+it does not assert acceptable regenerative current at every value. A 0.20 V request remains
+0.20 V even when the ceiling is 3.3 V. No 80 V/V supply scaling applies to either VESC input.
+
 ## Waveform commands and timing
 
 Every voltage below is **VESC AOUT current demand in volts**, not a calibrated torque,
 current in amperes, bus voltage or regulated speed. Never apply the RZ-XA 80 V/V mapping
-to this output. All sequences begin and end at 0 V normal stop demand. Holds maintain
-current demand, not measured wheel speed; the wheel may continue accelerating during them.
+to this output. All sequences begin and end at ADC1 zero demand; ADC2 finishes released.
+Holds maintain demand, not measured wheel speed; the wheel may continue accelerating.
 Durations are nominal playback time, excluding startup, verification and I/O delays.
 
 ### Motor Gentle — 10 seconds
@@ -82,7 +103,7 @@ Durations are nominal playback time, excluding startup, verification and I/O del
 | 3..7 | Hold 0.60 V for sustained drive demand |
 | 7..10 | Smooth ramp 0.60 -> 0 V; normal completion |
 
-The final ramp is a normal-stop request, not a separate low-positive-voltage brake command.
+The final ramp removes drive demand; it is not an ADC2 brake command or proof of a stopped wheel.
 Actual RPM, stopping time and electrical power must be measured; memory does not model them.
 
 ### Run Regen Test - Trial A coast / Trial B regen (~16-18 s)
@@ -91,15 +112,17 @@ Operator-tested ADC1 peak is **1.60 V**. Same DOUT selects Trial A or B by assig
 
 **Trial A** (`motor_coast_compare.json`): accel 0->1.60 V / hold / ->0 V, ADC2 stays at **0 V**
 release, observe passive coast. **Trial B** (`motor_regen_trial_b.json`, CES default): same
-accel, then prompt provisional ADC2 brake (config `brake_max`; offline 0.20 V). Unmatched
-open-loop timing - **not** proven regeneration or matched start RPM. Live physical ADC2 remains
-fail-closed; do not infer ADC2 capability from ADC1 testing.
+accel, then prompt ADC2 braking with assignment `brake_target_v` (example 0.20 V). Trial A
+remains coast-only; Trial B remains the default. Neither timing nor drive peaks changed.
+Unmatched open-loop timing is **not** proven regeneration or matched start RPM. Physical
+ADC2 uses the existing explicit authorization/release confirmations, not ADC1 authorization.
 
 ### Run Driving Cycle - ~23 seconds
 
-Peaks **0.60 / 1.00 / 1.60 V** with distinct coast and provisional ADC2 brake intervals;
+Peaks **0.60 / 1.00 / 1.60 V** with distinct coast and parameter-tuned ADC2 brake intervals;
 brake released before every accel; drive-to-zero+verify before every brake. Three progressively
-higher current demands illustrate acceleration rates, not regulated RPM setpoints.
+higher current demands illustrate acceleration rates, not regulated RPM setpoints. Only the
+two requested intensities use `brake_light_v` and `brake_heavy_v`; timing is unchanged.
 
 ### Run Efficiency Scan - ~22 seconds
 
@@ -111,7 +134,7 @@ higher current demands illustrate acceleration rates, not regulated RPM setpoint
 | 15..16 / 16..20 | Ramp to 1.60 V / 4 s hold |
 | 20..22 | Ramp to 0 V; normal completion |
 
-Levels **0.40 / 0.80 / 1.20 / 1.60 V** are enabled for offline CES after manual ADC1 upper-command
+Levels **0.40 / 0.80 / 1.20 / 1.60 V** preserve the operator-tested ADC1 upper-command
 authorization. ADC2 remains released for the entire scan. Compare measured acceleration,
 current, power and RPM before treating any level as a steady operating point; do not infer
 improvement from voltage alone. An unloaded sequential scan cannot establish equal initial
@@ -125,33 +148,38 @@ Matrix Sampler calculations and visualization; no such Python analysis is added.
 
 ## Limits and staged physical commissioning
 
-| Setting | Existing local physical config | New memory rehearsal |
+| Setting | Physical three-output example | Memory examples |
 |---|---|---|
-| Motor AOUT max | 0.40 V, unchanged | **1.60 V**, explicitly authorized offline after manual ADC1 test |
-| Legacy `neutral_aout_v` | 0 V normal-stop value; existing false acknowledgement unchanged | 0 V normal stop, `neutral_verified: false` |
-| Normal completion | Existing `return_neutral`, no live reauthorization | Verified 0 V demand readback, not verified stopped motion |
-| Cancel/fault/shutdown | Existing policies unchanged, not safety-qualified by this prompt | Attempt 0 V demand when backend is available; unknown on failure |
+| Motor AOUT max | **1.60 V**, commissioned limit 1.60 V / higher authorization true | Same ceiling and explicit higher authorization |
+| Legacy `neutral_aout_v` | 0 V zero drive; `neutral_verified: true` is operator confirmation | 0 V; `neutral_verified: false` |
+| ADC2 range / release | 0..3.3 V span / 0 V release, explicitly confirmed | Same span/release; confirmation false |
+| ADC2 request | Assignment parameters: 0.20 V Trial B; 0.15/0.20 V cycle examples | Same defaults, editable per assignment |
+| Normal completion | Drive zero and brake release verified by setpoint readback | Same; not proof of stationary motion |
+| Cancel/fault/shutdown | Existing zero-drive then brake-release attempts, supply preserved | Same policy with memory readback |
 | Supply range / gain | 0..0.50 V / 80 V/V, unchanged | Same, supply role only |
-| Physical higher levels | None newly enabled | No live physical authorization |
-| ADC2 / Braking Control | Live fail-closed | Offline coordination only; release 0 V; provisional demand not from ADC1 test |
+| Physical authorization | All three roles true; explicit brake enable and confirmations required | All physical flags/permissions false |
 
 Previously, output-level higher-limit fields were mandatory for simulations but could be
 absent for a physical clamp above 0.40 V. This gap is closed: above 0.40 V, **both** transports
 must explicitly provide a sufficient `commissioned_drive_limit_v` and
 `higher_drive_limit_authorized: true`. They cannot silently clamp or bypass per-profile bounds.
-A matching number/Boolean is an operator attestation, not feedback or proof of commissioning.
+A matching number/Boolean records the operator's authorization; it is not live feedback.
+The legacy 0.40 V default is not an additional ceiling when these fields authorize 1.60 V.
 Existing experiment-level authorizations still apply to experiment runners. Authorization at
 one layer does not bypass the other.
 
 ### Normal stopping versus safety-critical termination
 
 `Dispatcher.prepare()` verifies a zero-demand startup readback; it does not verify stationary
-motion. Normal profile completion ramps to 0 V and verifies that property readback.
+motion. Normal profile completion verifies zero drive and brake release property readbacks.
 `Dispatcher.run()` calls the same `cleanup()` path after cancellation, faults and shutdown:
-the existing policy attempts motor zero demand, then preserves/verifies supply demand. No
+the existing policy attempts motor zero demand, then brake release, then preserves/verifies supply demand. No
 supply shutdown/ramp is inserted into a motor profile. On communication loss that command
 may be impossible; state is reported unknown, not stopped. There is no automatic reconnect
-or retry of a failed profile command. Startup before authorization performs no guessed cleanup.
+or retry/continuation of a failed profile command. Cleanup is a separate best-effort attempt,
+not profile resumption. Startup before authorization performs no guessed cleanup. In the
+closed-loop backend, authorized brake release has the same readiness-independent exception
+as zero drive; non-release brake commands retain their existing readiness check.
 
 **Limitation:** completion, cancellation, fault and shutdown currently share the one legacy
 `neutral_aout_v`/`return_neutral` command. The software does not independently inhibit the
@@ -162,41 +190,30 @@ watchdog/failsafe behavior and source/sink protection must cover those failures.
 review requires a different fault response, separately specify and validate that response
 before changing the engine or enabling live profiles. This revision makes no such assumption.
 
-Before any physical profile can be enabled:
+### Operator workflow using existing confirmations
 
-1. Keep the motor independently inhibited and supply/source/sink protection verified. Obtain
-   the actual VESC Tool configuration/export: ADC application/control mode, ADC voltage range,
-   center/deadband, hysteresis, polarity, filtering, startup protection, signal loss and timeout
-   behavior. Confirm the observed current-control mode and voltage-to-current request mapping,
-   including the complete intended 0..1.6 V span; do not treat 0.3 V as coast or infer a
-   low-positive-voltage braking region.
-2. Record motor phase-current min/max, battery current min/max (including charge/regen),
-   power/voltage/ERPM limits, low/high bus-voltage cutoffs, thermal limits and maximum acceptable
-   regenerated energy. Verify supply sink capability and readiness independently over all
-   approved bus demands. No numeric values are invented here.
-3. Independently validate the 0 V normal-stop response and positive-current demand span using
-   an approved isolated low-energy procedure. Determine actual current, acceleration, maximum
-   RPM, stopping time, bus transients and energy flow. Current demand must remain bounded by
-   verified controller/electrical limits even as the wheel approaches maximum RPM. Neither
-   the observed 1.6 V acceleration nor a normal stop qualifies an electrical fault state.
-4. Determine the physical safe response for cancellation, process death, communication loss,
-   startup and shutdown. It may require an independently enforced inhibit/contactor/watchdog
-   rather than another ADC value. Process death/network loss cannot reliably issue any AOUT
-   command. Do not assume 0.30 V, 0 V or a successful property readback establishes safety.
-5. Separately review normal zero-demand completion and the approved physical fault response,
-   including the shared-command limitation above. All hardware authorizations and the local
-   `neutral_verified`/assignment hold remain unchanged. Do not re-enable them merely because
-   the prior 0.3 V coast interpretation has been corrected.
-6. Commission the complete usable ADC span, then raise live limits in reviewed stages.
-   Offline CES examples now authorize peaks through **1.60 V** after completed manual ADC1
-   testing (`higher_drive_limit_authorized: true`). Select only profiles entirely within the
-   authorized span: Gentle 0.60 V; regen/driving cycle/scan up to 1.60 V. Live physical configs
-   remain at their local ceilings until separately reviewed. No limit bypass is added.
-   Revalidate current/voltage/thermal and regenerative protections at each stage. ADC2 remains
-   a separate commissioning workstream (release 0 V; live fail-closed).
-7. Use OXYGEN-native measurements/recording and independent motor inhibition throughout initial
-   commissioning. Validate actual acceleration, settling, repeatability and deceleration; then
-   review the staged profiles' live eligibility and exact channel mappings separately.
+1. Prepare the operator configuration manually, preserving exact names, source discovery and
+   the confirmed 1.60 V ADC1 ceiling/commissioned limit/higher authorization. Keep all existing
+   controller-current settings unchanged. Set `enable_physical_aout` and
+   `enable_physical_brake` true; each physical role uses simulation false / physical true.
+   Keep RZ-XA SCPI and output toggling disabled. The physical example shows these settings.
+2. Record the existing wiring, zero-drive, brake-release, external enable and emergency-stop
+   confirmations. Brake release uses both `outputs.vesc_brake.brake_release_verified: true`
+   and `hardware_authorization.brake_release_verified: true`. Open-loop external bus/regen
+   protection acknowledgements remain required. Startup reads all selected AOUT properties;
+   it refuses a nonzero drive or unreleased brake without guessing a startup write.
+3. Preview without writes using
+   `python -m oxygen_engine dispatch-patterns --bindings examples/ces-physical-three-output.json`.
+   Choose the assignment brake parameters separately from the input-command span. When the
+   operator chooses to execute, the existing CLI still requires `--execute --live` and exact
+   `--confirm-output` names for **all three** channels, including `Braking Control`. No new
+   brake-specific CLI switch, numeric cap or hidden commissioning acknowledgement is added.
+4. Tune only the requested brake parameters in `dispatcher.json`, then restart and inspect
+   the preview/startup summary. Use OXYGEN's independently verified bus/current/power and RPM
+   signals to assess actual braking and returned power within the existing controller-current
+   and source/sink protections. A permitted 3.3 V command span is not a statement that all
+   brake intensities are acceptable. Software demand is not an emergency stop; retain the
+   independent physical protections already confirmed by the operator.
 
 The one-active-profile lease, supply-demand readback prerequisite, motor-neutral verification
 before supply motion, trigger observation limits, no queue, no retry and error diagnostics
@@ -223,8 +240,9 @@ Choose and verify a sign convention, for example positive DC power flowing into 
 - **Motoring:** positive measured DC power during a drive request; demand is not power.
 - **Positive current demand:** 0.3 V is not coast; even low positive demand can eventually
   reach high RPM. Higher demand primarily increases acceleration, within controller limits.
-- **Normal deceleration:** measured speed reduction after the demand ramps to 0 V. Friction, dissipation or
-  capacitor charging can brake without returning useful energy to the source/sink.
+- **Coast versus braking:** ADC1 zero with ADC2 released removes drive demand. Nonzero ADC2
+  requests braking; actual speed/current response must be measured. Friction, dissipation or
+  capacitor charging can decelerate the wheel without returning useful energy to the source/sink.
 - **Regeneration:** sustained negative measured DC power at a verified measurement point,
   above uncertainty/offsets and time-aligned with braking. To claim energy returned to the
   RZ-XA, additionally establish the energy path and supply-side sink acceptance; motor-side
