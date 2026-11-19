@@ -142,8 +142,9 @@ Use the dedicated command or schema-dispatch via `run-experiment`:
 ```
 
 See [regenerative deceleration commissioning](docs/regenerative-deceleration-commissioning.md).
-`Braking Control` remains unused. [Future ADC2 braking](docs/regenerative-extension-plan.md) is
-still design-only. Live physical regen stays disabled until verified; sim pass ≠ physical enable.
+`Braking Control` / `vesc_brake` is wired into the V3 dispatcher for offline coordinated
+profiles; [ADC2 braking extension](docs/regenerative-extension-plan.md) keeps live physical
+braking disabled until separately commissioned. Sim pass ≠ physical enable.
 
 ## Tests
 

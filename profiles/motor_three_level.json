@@ -1,116 +1,26 @@
 {
   "schema_version": 3,
   "name": "motor_three_level",
-  "description": "LEGACY ZERO-DEMAND MAPPING ONLY: historical 0.12/0.20/0.28 V AOUT-demand plateaus ending at 0 V normal stop demand. Voltage-to-current mapping is not calibrated. Positive current demand can continue accelerating; these are not fixed RPM points or evidence of efficiency. Normal stopping does not qualify fault safety or regeneration. Waveform retained for compatibility, not newly commissioned. Revised four-point staged candidate: profiles/ces/motor_three_level.json.",
+  "description": "Drive-only efficiency-scan plateaus on vesc_throttle. When vesc_brake is configured, brake remains verified released. Provisional offline waveform.",
   "output": "vesc_throttle",
   "timeout_s": 45,
-  "completion": {
-    "mode": "return_neutral",
-    "value": 0.0
-  },
-  "requires": {
-    "motor_neutral": true,
-    "motor_enable": "operator_verified"
-  },
+  "completion": {"mode": "return_neutral", "value": 0.0},
+  "requires": {"motor_neutral": true, "motor_enable": "operator_verified"},
   "steps": [
-    {
-      "type": "assert_preconditions",
-      "params": {
-        "motor_neutral": true
-      }
-    },
-    {
-      "type": "set_aout",
-      "params": {
-        "channel": "vesc_throttle",
-        "value": 0.0
-      }
-    },
-    {
-      "type": "ramp_aout",
-      "params": {
-        "channel": "vesc_throttle",
-        "target": 0.12,
-        "duration_s": 3
-      }
-    },
-    {
-      "type": "hold",
-      "params": {
-        "duration_s": 4
-      }
-    },
-    {
-      "type": "checkpoint",
-      "params": {
-        "name": "plateau_012_end"
-      }
-    },
-    {
-      "type": "ramp_aout",
-      "params": {
-        "channel": "vesc_throttle",
-        "target": 0.2,
-        "duration_s": 3
-      }
-    },
-    {
-      "type": "hold",
-      "params": {
-        "duration_s": 4
-      }
-    },
-    {
-      "type": "checkpoint",
-      "params": {
-        "name": "plateau_020_end"
-      }
-    },
-    {
-      "type": "ramp_aout",
-      "params": {
-        "channel": "vesc_throttle",
-        "target": 0.28,
-        "duration_s": 3
-      }
-    },
-    {
-      "type": "hold",
-      "params": {
-        "duration_s": 4
-      }
-    },
-    {
-      "type": "checkpoint",
-      "params": {
-        "name": "plateau_028_end"
-      }
-    },
-    {
-      "type": "ramp_aout",
-      "params": {
-        "channel": "vesc_throttle",
-        "target": 0,
-        "duration_s": 4
-      }
-    },
-    {
-      "type": "hold",
-      "params": {
-        "duration_s": 6
-      }
-    },
-    {
-      "type": "checkpoint",
-      "params": {
-        "name": "neutral_coast_end"
-      }
-    },
-    {
-      "type": "return_neutral",
-      "params": {
-        "channel": "vesc_throttle"
-      }
-    }
+    {"type": "assert_preconditions", "params": {"motor_neutral": true}},
+    {"type": "set_aout", "params": {"channel": "vesc_throttle", "value": 0.0}},
+    {"type": "ramp_aout", "params": {"channel": "vesc_throttle", "target": 0.12, "duration_s": 3}},
+    {"type": "hold", "params": {"duration_s": 4}},
+    {"type": "checkpoint", "params": {"name": "plateau_012_end"}},
+    {"type": "ramp_aout", "params": {"channel": "vesc_throttle", "target": 0.2, "duration_s": 3}},
+    {"type": "hold", "params": {"duration_s": 4}},
+    {"type": "checkpoint", "params": {"name": "plateau_020_end"}},
+    {"type": "ramp_aout", "params": {"channel": "vesc_throttle", "target": 0.28, "duration_s": 3}},
+    {"type": "hold", "params": {"duration_s": 4}},
+    {"type": "checkpoint", "params": {"name": "plateau_028_end"}},
+    {"type": "ramp_aout", "params": {"channel": "vesc_throttle", "target": 0, "duration_s": 4}},
+    {"type": "hold", "params": {"duration_s": 6}},
+    {"type": "checkpoint", "params": {"name": "neutral_coast_end"}},
+    {"type": "return_neutral", "params": {"channel": "vesc_throttle"}}
   ]
 }

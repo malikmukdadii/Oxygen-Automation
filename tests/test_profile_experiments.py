@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from oxygen_engine.dispatcher import Dispatcher, MOTOR, SUPPLY, configuration_summary
+from oxygen_engine.dispatcher import BRAKE, Dispatcher, MOTOR, SUPPLY, configuration_summary
 from oxygen_engine.errors import ControlError, InterlockError
 from oxygen_engine.memory_backend import MemoryBackend, SimulationFinished
 from oxygen_engine.schema import SUPPLY_DEMAND_GRID, load_dispatcher_config
@@ -85,16 +85,18 @@ def test_v3_library_real_timeline_repeatable_in_memory(tmp_path, profile_path, i
         assert [r['name'] for r in records[before:] if r['event'] == 'checkpoint'] == expected_checkpoints
         if not relative:
             assert clock.now > 0
-    spec = raw['outputs'][role]
+    allowed_roles = set(profile.get('outputs', [role]))
     if relative and initial == .5 and delta == 1:
         assert not backend.commands
     else:
         assert backend.commands
-    assert all(r == role and spec['min_aout_v'] <= value <= spec['max_aout_v']
+    assert all(r in allowed_roles and raw['outputs'][r]['min_aout_v'] <= value <= raw['outputs'][r]['max_aout_v']
                for _, r, value in backend.commands)
     assert dispatcher.completed == 2
     assert dispatcher.cleanup()
     assert dispatcher.states[MOTOR].value == 0
+    if BRAKE in dispatcher.states:
+        assert dispatcher.states[BRAKE].value == raw['outputs'][BRAKE]['brake_release_aout_v']
     assert not any(r['event'] == 'independent_feedback' for r in records)
     backend.close()
 
@@ -116,7 +118,7 @@ def test_disabled_assignments_are_reported_but_not_polled(tmp_path):
     dispatcher.prepare()
     startup = next(r for r in records if r['event'] == 'dispatcher_startup_summary')
     assert startup['dispatcher_state'] == 'ready'
-    assert set(startup['resolved_outputs']) == {SUPPLY, MOTOR}
+    assert set(startup['resolved_outputs']) == {SUPPLY, MOTOR, BRAKE}
     backend.close()
 
 

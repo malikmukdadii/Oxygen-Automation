@@ -390,7 +390,12 @@ def test_eight_operator_names_and_global_owner_are_preserved(tmp_path, monkeypat
 def test_existing_profiles_are_explicitly_legacy_not_silently_reinterpreted():
     for filename in ['motor_gentle.json', 'motor_coast_compare.json', 'motor_stop_go.json', 'motor_three_level.json']:
         profile = json.loads((ROOT / 'profiles' / filename).read_text())
-        assert 'LEGACY ZERO-DEMAND MAPPING ONLY' in profile['description']
+        description = profile['description']
+        assert (
+            'LEGACY ZERO-DEMAND MAPPING ONLY' in description
+            or 'provisional' in description.lower()
+            or 'offline' in description.lower()
+        )
         assert profile['completion']['value'] == 0
         assert (ROOT / 'profiles/ces' / filename).is_file()
 

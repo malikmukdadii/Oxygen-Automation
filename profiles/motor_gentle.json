@@ -1,7 +1,7 @@
 {
   "schema_version": 3,
   "name": "motor_gentle",
-  "description": "LEGACY ZERO-DEMAND MAPPING ONLY: historical 0.25 V AOUT-demand pulse ending at 0 V normal stop demand. Voltage-to-current mapping is not calibrated; current demand is not regulated speed. Normal stopping does not qualify fault safety or regeneration. Waveform retained for compatibility, not newly commissioned. Revised staged candidate: profiles/ces/motor_gentle.json.",
+  "description": "Drive-only gentle pulse on vesc_throttle (offline). When vesc_brake is configured, the dispatcher verifies ADC2/Braking Control is released before start; completion returns ADC1 to 0 V.",
   "output": "vesc_throttle",
   "timeout_s": 30,
   "completion": {"mode": "return_neutral", "value": 0.0},
