@@ -1,0 +1,48 @@
+{
+  "_comment": "Physical migration fragment — merge manually into local dispatcher.json. Not a runnable standalone config. All physical flags remain fail-closed until operator commissioning. Do not invent channel IDs.",
+  "schema_version": 3,
+  "control": {"mode": "open_loop"},
+  "transport": "oxygen_scpi",
+  "live_control": {
+    "enable_physical_aout": false,
+    "enable_physical_brake": false,
+    "enable_rzxa_output_toggle": false,
+    "enable_real_rzxa_scpi": false,
+    "require_explicit_hardware_authorization": true
+  },
+  "timing": {
+    "poll_ms": 20,
+    "max_trigger_gap_ms": 100,
+    "interval_ms": 20,
+    "max_lateness_ms": 250
+  },
+  "outputs_notes": {
+    "rzxa_voltage_demand.channel": "Takasago Voltage Control",
+    "vesc_throttle.channel": "Drive Control",
+    "vesc_brake.channel": "Braking Control",
+    "authorization": "Set simulation false / physical true only after explicit hardware acknowledgements"
+  },
+  "measurements_notes": {
+    "dc_bus_voltage": {
+      "kind": "number",
+      "unit": "V",
+      "channel": "<exact OXYGEN measured bus channel name>",
+      "mapping_verified": false,
+      "note": "Set mapping_verified true only after operator verification; Mode 2 requires this channel"
+    },
+    "erpm": {
+      "kind": "number",
+      "unit": "erpm",
+      "channel": "<exact OXYGEN ERPM/CAN telemetry channel name>",
+      "mapping_verified": false,
+      "note": "Mode 3 only; set accel/brake RPM targets before physical use"
+    }
+  },
+  "additive_assignments": [
+    {"name": "fast_regen_test", "kind": "fast_regen", "trigger": "<exact DOUT>", "output": "vesc_throttle", "parameters": {"brake_target_v": 0.20}},
+    {"name": "motor_sweep_open_loop", "kind": "motor_sweep", "trigger": "<exact DOUT>", "output": "vesc_throttle", "motor_sweep": {"mode": "open_loop", "round_trips": 1}},
+    {"name": "motor_sweep_voltage_closed_loop", "kind": "motor_sweep", "trigger": "<exact DOUT>", "output": "vesc_throttle", "motor_sweep": {"mode": "voltage_closed_loop", "round_trips": 1}},
+    {"name": "motor_sweep_full_closed_loop", "kind": "motor_sweep", "trigger": "<exact DOUT>", "output": "vesc_throttle", "motor_sweep": {"mode": "full_closed_loop", "round_trips": 1, "fast_regen": {"accel_rpm_target": null, "brake_rpm_target": null}}},
+    {"name": "stop_sweep", "kind": "stop_sweep", "trigger": "<exact DOUT>", "output": "vesc_throttle"}
+  ]
+}

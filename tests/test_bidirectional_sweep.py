@@ -347,7 +347,8 @@ def test_stale_supervisory_sample_fails_closed(tmp_path):
     dispatcher.prepare()
     backend.inject('dc_bus_voltage', 40.0, sampled_at=clock.now - 10.0)
     with pytest.raises(InterlockError, match='stale|no silent'):
-        dispatcher.sample_supervisory('dc_bus_voltage', max_age=0.25)
+        sample = dispatcher.sample_supervisory('dc_bus_voltage', max_age=0.25)
+        assert sample.value  # unreachable when stale
 
 
 def test_full_closed_loop_rpm_early_exit(tmp_path):

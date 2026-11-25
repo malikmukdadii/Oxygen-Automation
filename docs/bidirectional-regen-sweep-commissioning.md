@@ -84,10 +84,18 @@ JSONL already logs `lateness_ms`, `interval_ms`, `skipped_update_slots`, and
 ## Migration notes
 
 - Assignment limit raised **8 → 16** so CES buttons can coexist with sweeps.
-- Optional root `motor_sweep_defaults` plus per-assignment overrides.
+- Optional root `motor_sweep_defaults` plus per-assignment overrides with **documented
+  deep-merge** for nested `fast_regen` / `voltage_qualify` / `rpm_feedback` objects.
+- Explicit assignment `parameters.brake_target_v` overrides shared Fast Regen
+  `brake_target_v` (same rule as classic CES regen profiles).
 - Optional interlock `supply_demand_step_v` (default 0.5) allows listing a 0.25 V
   motor-prerequisite grid without changing relative 0.5 V step profiles.
 - Assignment `kind`: `profile` (default) | `motor_sweep` | `fast_regen` | `stop_sweep`.
+- Full grid + Fast Regen command amplitudes are validated against authorized AOUT
+  ranges at config load (before first physical write).
+- Supervisory voltage/RPM qualification requires **advancing** samples; host-SCPI
+  freshness is used when OXYGEN does not expose per-sample acquisition timestamps
+  on the numeric path (limitation logged). Open-loop sweeps remain measurement-independent.
 
 ## Launch commands
 

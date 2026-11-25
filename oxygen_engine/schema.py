@@ -829,11 +829,20 @@ def load_dispatcher_config(path) -> DispatcherConfig:
                 raise ConfigError('motor_sweep requires supply, throttle, and brake roles')
             if assignment.get('profile'):
                 raise ConfigError('motor_sweep assignments use motor_sweep config, not profile')
-            from .motor_sweep import parse_motor_sweep
-            merged = {**defaults, **(assignment.get('motor_sweep') or {})}
+            from .motor_sweep import deep_merge, parse_motor_sweep
+            # Documented deep-merge: nested fast_regen / voltage_qualify / rpm_feedback
+            # assignment keys override motor_sweep_defaults without wiping siblings.
+            merged = deep_merge(defaults, assignment.get('motor_sweep') or {})
+            parameters = assignment.get('parameters') or {}
+            if isinstance(parameters, dict) and 'brake_target_v' in parameters:
+                # Explicit assignment brake_target_v overrides shared Fast Regen defaults.
+                fr = dict(merged.get('fast_regen') or {})
+                fr['brake_target_v'] = parameters['brake_target_v']
+                merged['fast_regen'] = fr
             if 'mode' not in merged:
                 raise ConfigError(f'{name}: motor_sweep.mode is required')
-            # Validate feedback channels exist before the assignment starts.
+            # Validate feedback channels exist before the assignment starts
+            # (open-loop assignments do not require V/RPM channels).
             sweep_cfg = parse_motor_sweep(merged, outputs=outputs)
             if sweep_cfg.voltage_qualify is not None:
                 channel = sweep_cfg.voltage_qualify.channel

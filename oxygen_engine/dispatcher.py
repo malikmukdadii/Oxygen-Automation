@@ -248,6 +248,9 @@ class Dispatcher:
         Works in open_loop global mode. Does **not** call require_controller() or
         controller.correct() — voltage qualification is not PID trim. Stale/missing
         samples fail closed (no silent open-loop fallback).
+
+        Returns the full Sample so callers can enforce advancing freshness
+        (acquisition_time_s / sequence / sampled_at) before advancing qualify timers.
         """
         if name not in self.config.raw.get('measurements', {}):
             raise InterlockError(f'Supervisory measurement not configured: {name}')
@@ -267,8 +270,11 @@ class Dispatcher:
             number(sample.value, name, -1_000_000, 1_000_000)
         self.emit({'event': 'supervisory_feedback', 'name': name, 'value': sample.value,
                    'age_s': age, 'source': sample.source, 'simulated': not self.physical,
+                   'freshness': getattr(sample, 'freshness', 'host_scpi'),
+                   'acquisition_time_s': getattr(sample, 'acquisition_time_s', None),
+                   'sequence': getattr(sample, 'sequence', None),
                    'uses_require_controller': False, 'pid_trim': False})
-        return sample.value
+        return sample
 
     def log_measurements(self, *, deadline=None):
         """Open-loop optional logging only; never raises into control flow or alters setpoints."""
@@ -838,15 +844,21 @@ class Dispatcher:
                 self.maybe_poll_telemetry(budget_s=timing['poll_ms'] / 2000)
             self.wait(timing['poll_ms'] / 1000)
 
-    def _run_multi_timeline(self, pattern, apply_values, verify, progress):
-        """Deterministic coordinated playback with serialized per-tick role writes."""
+    def _run_multi_timeline(self, pattern, apply_values, verify, progress, *, wait=None):
+        """Deterministic coordinated playback with serialized per-tick role writes.
+
+        Mandatory phase boundaries are never skipped under lateness: when wall time
+        jumps past several boundaries, each boundary is applied and verified in order
+        before advancing further (brake release / neutral / brake demand transitions).
+        """
         interval_s = self.config.raw['timing']['interval_ms'] / 1000
         max_lateness_s = self.config.raw['timing']['max_lateness_ms'] / 1000
+        sleep = self.wait if wait is None else wait
         # Offline tests inject a multi-aware boundary timeline; stock execute_timeline is scalar-only.
         if self.timeline is not execute_timeline:
             return self.timeline(pattern, apply_values, verify, progress,
                                  interval_s=interval_s, max_lateness_s=max_lateness_s,
-                                 clock=self.clock, wait=self.wait)
+                                 clock=self.clock, wait=sleep)
         started = self.clock()
         deadline = started
         last_values = None
@@ -854,52 +866,80 @@ class Dispatcher:
         last_progress = -math.inf
         skipped = 0
         maximum_lateness = 0.0
-
-        def elapsed_at(now):
-            reached = (t for t in pattern.boundaries if now >= started + t)
-            return max(now - started, max(reached, default=0.0))
+        pending_boundaries = list(pattern.boundaries)
+        configured_interval_ms = interval_s * 1000
+        achieved_intervals_ms = []
+        # Catch-up of overdue mandatory boundaries runs synchronously (no sleep), bounded
+        # by the number of remaining boundaries so a logic bug cannot spin forever.
+        catchup_budget = len(pending_boundaries) + 2
 
         while True:
-            self.wait(max(0.0, deadline - self.clock()))
+            sleep(max(0.0, deadline - self.clock()))
             now = self.clock()
             late = max(0.0, now - deadline)
             maximum_lateness = max(maximum_lateness, late)
             if late > max_lateness_s:
                 raise TimeoutError(f'Pattern update exceeded the lateness limit: {late:.3f}s')
-            elapsed = elapsed_at(now)
+            raw_elapsed = now - started
+            # Cap advance to the next unprocessed mandatory boundary (no skip).
+            at_boundary = bool(pending_boundaries) and raw_elapsed + 1e-12 >= pending_boundaries[0]
+            elapsed = pending_boundaries[0] if at_boundary else raw_elapsed
             values = pattern.values_at(elapsed)
             phase = pattern.phase_at(elapsed)
             operation_started = self.clock()
-            progress_due = phase != last_phase or elapsed - last_progress >= .5
+            progress_due = at_boundary or phase != last_phase or elapsed - last_progress >= .5
             if last_values is None or any(
                     not math.isclose(last_values[role], values[role], abs_tol=1e-12, rel_tol=0)
                     for role in pattern.roles):
                 apply_values(values)
                 last_values = dict(values)
-            if progress_due:
+            if progress_due or at_boundary:
                 verify(values)
-                progress({'event': 'progress', 'phase': phase, 'elapsed_s': elapsed,
-                          'nominal_duration_s': pattern.duration_s, 'requested': values,
-                          'lateness_ms': late * 1000,
-                          'io_ms': (self.clock() - operation_started) * 1000})
+                progress({
+                    'event': 'progress', 'phase': phase, 'elapsed_s': elapsed,
+                    'nominal_duration_s': pattern.duration_s, 'requested': values,
+                    'lateness_ms': late * 1000,
+                    'io_ms': (self.clock() - operation_started) * 1000,
+                    'configured_interval_ms': configured_interval_ms,
+                    'mandatory_boundary': at_boundary,
+                })
                 last_progress = elapsed
                 last_phase = phase
-            if elapsed >= pattern.duration_s:
+            if at_boundary:
+                pending_boundaries.pop(0)
+                catchup_budget -= 1
+            if elapsed + 1e-12 >= pattern.duration_s and not pending_boundaries:
                 actual_elapsed = self.clock() - started
                 completion_lateness = max(0.0, actual_elapsed - pattern.duration_s)
                 if completion_lateness > max_lateness_s:
                     raise TimeoutError(
                         f'Final setpoint acknowledgement exceeded the completion limit: {completion_lateness:.3f}s')
-                return {'nominal_duration_s': pattern.duration_s, 'actual_elapsed_s': actual_elapsed,
-                        'completion_lateness_ms': completion_lateness * 1000,
-                        'skipped_update_slots': skipped, 'maximum_lateness_ms': maximum_lateness * 1000}
-            after = elapsed_at(self.clock())
+                mean_achieved = (
+                    sum(achieved_intervals_ms) / len(achieved_intervals_ms)
+                    if achieved_intervals_ms else configured_interval_ms)
+                return {
+                    'nominal_duration_s': pattern.duration_s, 'actual_elapsed_s': actual_elapsed,
+                    'completion_lateness_ms': completion_lateness * 1000,
+                    'skipped_update_slots': skipped, 'maximum_lateness_ms': maximum_lateness * 1000,
+                    'configured_interval_ms': configured_interval_ms,
+                    'achieved_interval_ms': mean_achieved,
+                }
+            after = elapsed
+            # If more mandatory boundaries are already due, process the next one immediately.
+            if pending_boundaries and (self.clock() - started) + 1e-12 >= pending_boundaries[0]:
+                if catchup_budget < 0:
+                    raise TimeoutError('Mandatory boundary catch-up exceeded budget; refusing to spin')
+                deadline = self.clock()
+                continue
+            catchup_budget = len(pending_boundaries) + 2
             due_index = math.floor(max(0, after) / interval_s + 1e-9) + 1
             prior_index = math.floor(max(0, elapsed) / interval_s + 1e-9)
             skipped += max(0, due_index - prior_index - 1)
             future = [due_index * interval_s, pattern.duration_s]
-            future.extend(t for t in pattern.boundaries if t > after)
-            deadline = started + min(future)
+            future.extend(t for t in pending_boundaries if t > after + 1e-12)
+            next_deadline = started + min(future)
+            achieved_intervals_ms.append(max(0.0, (next_deadline - deadline)) * 1000)
+            deadline = next_deadline
 
     def cleanup(self):
         safe = True
