@@ -19,9 +19,14 @@ class SimulationFinished(Exception):
 @dataclass(frozen=True)
 class Sample:
     value: float | bool
-    sampled_at: float
+    sampled_at: float  # host monotonic when the sample was captured/returned
     source: str = 'FAKE independent injected sensor'
     simulated: bool = True
+    # Optional plant/acquisition domain stamp. None ⇒ freshness is host-SCPI only.
+    acquisition_time_s: float | None = None
+    sequence: int | None = None
+    freshness: str = 'host_scpi'  # host_scpi | acquisition | sequence
+    pinned: bool = False  # True when inject() pinned an explicit sampled_at (stale tests)
 
 
 def load_scenario(path, measurements, button_names=None):
@@ -116,15 +121,27 @@ class MemoryBackend:
                 raise SimulationFinished('End of explicit simulation scenario')
         if self.streaming and now >= self.next_sample and self.sensor_values:
             for name, value in self.sensor_values.items():
-                self.samples[name] = Sample(value, now)
+                prior = self.samples.get(name)
+                seq = 0 if prior is None or prior.sequence is None else prior.sequence + 1
+                self.samples[name] = Sample(
+                    value, now, acquisition_time_s=now, sequence=seq,
+                    freshness='acquisition', pinned=False)
             self.next_sample = now + self.sample_interval
 
-    def inject(self, name, value, *, sampled_at=None):
+    def inject(self, name, value, *, sampled_at=None, acquisition_time_s=None, sequence=None):
         with self.lock:
             if name not in self.sensor_values and name not in self.config.raw.get('measurements', {}):
                 raise ConfigError('Unknown independent sensor fixture')
             self.sensor_values[name] = value
-            self.samples[name] = Sample(value, self.clock() if sampled_at is None else sampled_at)
+            prior = self.samples.get(name)
+            pinned = sampled_at is not None
+            stamp = self.clock() if sampled_at is None else sampled_at
+            if sequence is None:
+                sequence = 0 if prior is None or prior.sequence is None else prior.sequence + 1
+            acq = stamp if acquisition_time_s is None else acquisition_time_s
+            self.samples[name] = Sample(
+                value, stamp, acquisition_time_s=acq, sequence=sequence,
+                freshness='acquisition' if not pinned else 'host_scpi', pinned=pinned)
 
     def discover(self):
         with self.lock:
@@ -196,7 +213,15 @@ class MemoryBackend:
             if name not in self.sensor_values:
                 raise InterlockError(f'cannot satisfy measurement request: {name}')
             sample = self.samples.get(name)
-            if sample is None:
-                sample = Sample(self.sensor_values[name], self.clock())
-                self.samples[name] = sample
+            if sample is not None and sample.pinned:
+                # Explicit inject(..., sampled_at=...) stays stale until re-injected.
+                return sample
+            now = self.clock()
+            prior = sample
+            seq = 0 if prior is None or prior.sequence is None else prior.sequence + 1
+            # Unpinned / streaming: each measure is a fresh acquisition sample.
+            sample = Sample(
+                self.sensor_values[name], now, acquisition_time_s=now, sequence=seq,
+                freshness='acquisition', pinned=False)
+            self.samples[name] = sample
             return sample

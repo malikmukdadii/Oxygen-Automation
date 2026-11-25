@@ -247,8 +247,8 @@ def execute_timeline(pattern: ConstantPattern, setpoint: Callable[[float], None]
                      interval_s: float = .05, max_lateness_s: float = .25,
                      clock: Callable[[], float] = time.monotonic,
                      wait: Callable[[float], None] = time.sleep) -> dict:
-    if not .02 <= finite_number(interval_s, 'interval') <= .25:
-        raise ValueError('Update interval must be between 20 and 250 ms')
+    if not .01 <= finite_number(interval_s, 'interval') <= .25:
+        raise ValueError('Update interval must be between 10 and 250 ms')
     if not 0 < finite_number(max_lateness_s, 'maximum lateness') <= 1:
         raise ValueError('Maximum lateness must be positive and no greater than one second')
     started = clock()
@@ -382,7 +382,7 @@ def run_constant_pattern(args) -> int:
     pattern = ConstantPattern.from_profile(load_profile(args.profile))
     interval_s = finite_number(args.interval_ms, 'interval') / 1000
     lateness_s = finite_number(args.max_lateness_ms, 'maximum lateness') / 1000
-    if not .02 <= interval_s <= .25 or not 0 < lateness_s <= 1:
+    if not .01 <= interval_s <= .25 or not 0 < lateness_s <= 1:
         raise ValueError('Use an interval of 20..250 ms and maximum lateness of 1..1000 ms')
     if not 1 <= args.port <= 65535 or finite_number(args.timeout, 'timeout') <= 0:
         raise ValueError('A valid port and positive timeout are required')
@@ -396,7 +396,7 @@ def run_constant_pattern(args) -> int:
         OxygenAdapter._channel_id(args.expected_id)
     trigger_do = getattr(args, 'trigger_do', None)
     if trigger_do:
-        if not .02 <= finite_number(args.poll_ms, 'DO poll interval') / 1000 <= .25:
+        if not .01 <= finite_number(args.poll_ms, 'DO poll interval') / 1000 <= .25:
             raise ValueError('DO poll interval must be between 20 and 250 ms')
         if not args.poll_ms < finite_number(args.max_trigger_gap_ms, 'DO maximum gap') <= 1000:
             raise ValueError('DO maximum gap must exceed the poll interval and be at most 1000 ms')

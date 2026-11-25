@@ -28,12 +28,27 @@ BRAKE = BRAKE
 def configuration_summary(config):
     enabled, disabled = [], []
     for assignment in config.raw['assignments']:
-        record = {key: assignment.get(key) for key in ('name', 'trigger', 'output', 'profile', 'parameters')}
+        record = {key: assignment.get(key) for key in (
+            'name', 'trigger', 'output', 'profile', 'parameters', 'kind', 'motor_sweep', 'fast_regen')}
         if assignment.get('enabled', True):
-            profile = config.profiles[assignment['name']]
-            record.update(profile=str(profile.path), completion=profile.completion,
-                          nominal_duration_s=sum(step.get('params', {}).get('duration_s', 0)
-                                                 for step in profile.steps))
+            kind = assignment.get('kind', 'profile')
+            name = assignment['name']
+            if kind == 'stop_sweep':
+                record.update(kind='stop_sweep', cooperative_cancel=True,
+                              message='Software stop during sweeps — not a physical E-stop')
+            elif kind == 'motor_sweep':
+                sweep = config.motor_sweeps[name]
+                record.update(kind='motor_sweep', mode=sweep.mode,
+                              nominal_fast_regen_s=sweep.fast_regen.nominal_duration_s,
+                              continuous=sweep.continuous, round_trips=sweep.round_trips)
+            elif kind == 'fast_regen':
+                fr = config.fast_regens[name]
+                record.update(kind='fast_regen', nominal_duration_s=fr.nominal_duration_s)
+            else:
+                profile = config.profiles[name]
+                record.update(profile=str(profile.path), completion=profile.completion,
+                              nominal_duration_s=sum(step.get('params', {}).get('duration_s', 0)
+                                                     for step in profile.steps))
             enabled.append(record)
         else:
             disabled.append({**record, 'reason': 'enabled=false; trigger is not polled and will not respond',
@@ -45,7 +60,12 @@ def configuration_summary(config):
                                                  'max_aout_v', 'neutral_aout_v', 'expected_id')}
             for role, spec in config.raw['outputs'].items()
         },
-        'trigger_policy': 'LOW then HIGH; no queue; polling pauses during profiles; pulses while busy may be missed',
+        'trigger_policy': (
+            'LOW then HIGH; no queue; polling pauses during profiles; '
+            'Stop Sweep is cooperatively polled during motor sweeps; '
+            'busy pulses on other buttons are ignored (not queued)'
+        ),
+        'stop_sweep_trigger': config.stop_sweep_trigger,
     }
 
 
@@ -89,6 +109,9 @@ class Dispatcher:
         self.completed = 0
         self.interrupted_cycle = False
         self._last_telemetry_at = None
+        # Sweep-local dynamic bus context; does not mutate global interlocks/mode.
+        self.sweep_context = None
+        self._active_sweep_runner = None
         if not self.open_loop:
             # Fail closed early if closed_loop was selected without a controller.
             require_controller()
@@ -219,6 +242,40 @@ class Dispatcher:
                    'age_s': age, 'source': sample.source, 'simulated': not self.physical})
         return sample.value
 
+    def sample_supervisory(self, name, *, max_age):
+        """Per-assignment supervisory qualification / RPM feedback.
+
+        Works in open_loop global mode. Does **not** call require_controller() or
+        controller.correct() — voltage qualification is not PID trim. Stale/missing
+        samples fail closed (no silent open-loop fallback).
+
+        Returns the full Sample so callers can enforce advancing freshness
+        (acquisition_time_s / sequence / sampled_at) before advancing qualify timers.
+        """
+        if name not in self.config.raw.get('measurements', {}):
+            raise InterlockError(f'Supervisory measurement not configured: {name}')
+        sample = self.backend.measure(name)
+        age = self.clock() - sample.sampled_at
+        trusted = (sample.simulated is (not self.physical) and
+                   sample.source.startswith('FAKE ' if not self.physical else 'OXYGEN '))
+        if not trusted or not 0 <= age <= max_age:
+            raise InterlockError(
+                f'Missing/stale/untrusted supervisory sample: {name}, age={age}; '
+                'no silent open-loop fallback')
+        kind = self.config.raw['measurements'][name]['kind']
+        if kind == 'boolean' and type(sample.value) is not bool:
+            raise InterlockError(f'{name} must be Boolean')
+        if kind == 'number':
+            # RPM channels can exceed ±1000; allow a wider numeric span for supervisory use.
+            number(sample.value, name, -1_000_000, 1_000_000)
+        self.emit({'event': 'supervisory_feedback', 'name': name, 'value': sample.value,
+                   'age_s': age, 'source': sample.source, 'simulated': not self.physical,
+                   'freshness': getattr(sample, 'freshness', 'host_scpi'),
+                   'acquisition_time_s': getattr(sample, 'acquisition_time_s', None),
+                   'sequence': getattr(sample, 'sequence', None),
+                   'uses_require_controller': False, 'pid_trim': False})
+        return sample
+
     def log_measurements(self, *, deadline=None):
         """Open-loop optional logging only; never raises into control flow or alters setpoints."""
         if not self.open_loop:
@@ -286,10 +343,19 @@ class Dispatcher:
         interlocks = self.config.raw['interlocks']
         if self.has_supply and interlocks.get('require_supply_demand_before_motor', False):
             actual = self.verify(SUPPLY)
-            demands = (interlocks['motor_supply_demands_v'] if 'motor_supply_demands_v' in interlocks
-                       else [interlocks['motor_supply_demand_v']])
-            if not any(math.isclose(actual, demand, abs_tol=1e-6, rel_tol=0) for demand in demands):
-                raise InterlockError('Supply demand readback is not a configured motor prerequisite; physical bus safety is not established')
+            # Sweep-local allowed demand: owning supply+motor+brake during a visit must not
+            # trip the static discrete-grid guard when the sweep has verified its own target.
+            if self.sweep_context is not None and self.sweep_context.acked_aout_v is not None:
+                target = self.sweep_context.acked_aout_v
+                if not math.isclose(actual, target, abs_tol=1e-6, rel_tol=0):
+                    raise InterlockError(
+                        'Sweep supply demand readback drifted from the visit target; '
+                        'physical bus safety is not established')
+            else:
+                demands = (interlocks['motor_supply_demands_v'] if 'motor_supply_demands_v' in interlocks
+                           else [interlocks['motor_supply_demand_v']])
+                if not any(math.isclose(actual, demand, abs_tol=1e-6, rel_tol=0) for demand in demands):
+                    raise InterlockError('Supply demand readback is not a configured motor prerequisite; physical bus safety is not established')
         elif interlocks.get('require_supply_demand_before_motor'):
             raise InterlockError('require_supply_demand_before_motor needs an active supply role')
         if self.open_loop:
@@ -617,14 +683,89 @@ class Dispatcher:
             self.active_profile = self.active_role = None
             self.active_roles = ()
 
+    def _assignment_kind(self, name: str) -> str:
+        for assignment in self.config.raw['assignments']:
+            if assignment.get('name') == name and assignment.get('enabled', True):
+                return assignment.get('kind', 'profile')
+        raise ControlError(f'Unknown assignment: {name}')
+
+    def execute_assignment(self, name, *, trigger_observed=None):
+        kind = self._assignment_kind(name)
+        if kind == 'stop_sweep':
+            self.emit({
+                'event': 'stop_sweep_idle',
+                'assignment': name,
+                'message': 'Stop Sweep pressed while idle; no sweep to cancel',
+                'software_stop_is_not_estop': True,
+            })
+            return
+        if kind == 'motor_sweep':
+            return self.execute_motor_sweep(name, trigger_observed=trigger_observed)
+        if kind == 'fast_regen':
+            return self.execute_fast_regen(name, trigger_observed=trigger_observed)
+        return self.execute_profile(name, trigger_observed=trigger_observed)
+
+    def execute_motor_sweep(self, name, *, trigger_observed=None):
+        from .motor_sweep import MotorSweepRunner
+
+        if not self.prepared or self.active_profile is not None:
+            raise ControlError('Dispatcher is not prepared or another profile owns an output')
+        if self.interrupted_cycle or any(state.status == 'unknown' for state in self.states.values()):
+            raise ControlError('Interrupted operation or unknown output state; explicit restart and review required')
+        if trigger_observed is not None and not 0 <= self.clock() - trigger_observed <= self.config.raw['timing']['max_trigger_gap_ms'] / 1000:
+            self.emit({'event': 'trigger_stale', 'assignment': name,
+                       'age_s': self.clock() - trigger_observed,
+                       'message': 'Precondition checks aged out the edge; no run. Apply a fresh LOW then HIGH.'})
+            return
+        sweep = self.config.motor_sweeps[name]
+        runner = MotorSweepRunner(
+            self, sweep, name, stop_trigger=self.config.stop_sweep_trigger)
+        self._active_sweep_runner = runner
+        self.emit({
+            'event': 'motor_sweep_dispatch',
+            'assignment': name,
+            'mode': sweep.mode,
+            'stop_sweep_trigger': self.config.stop_sweep_trigger,
+            'button_polling': 'cooperative_stop_only',
+            'message': 'Conflicting manual starts are ignored during the sweep (ownership; not queued). '
+                       'Stop Sweep is software cancel — not a physical E-stop.',
+        })
+        try:
+            return runner.run()
+        finally:
+            self._active_sweep_runner = None
+
+    def execute_fast_regen(self, name, *, trigger_observed=None):
+        from .motor_sweep import run_standalone_fast_regen
+
+        if not self.prepared or self.active_profile is not None:
+            raise ControlError('Dispatcher is not prepared or another profile owns an output')
+        if self.interrupted_cycle or any(state.status == 'unknown' for state in self.states.values()):
+            raise ControlError('Interrupted operation or unknown output state; explicit restart and review required')
+        if trigger_observed is not None and not 0 <= self.clock() - trigger_observed <= self.config.raw['timing']['max_trigger_gap_ms'] / 1000:
+            self.emit({'event': 'trigger_stale', 'assignment': name,
+                       'age_s': self.clock() - trigger_observed,
+                       'message': 'Precondition checks aged out the edge; no run. Apply a fresh LOW then HIGH.'})
+            return
+        fr = self.config.fast_regens[name]
+        self.emit({'event': 'fast_regen_dispatch', 'assignment': name,
+                   'nominal_duration_s': fr.nominal_duration_s})
+        return run_standalone_fast_regen(
+            self, fr, name, stop_trigger=self.config.stop_sweep_trigger)
+
     def monitor(self):
         timing = self.config.raw['timing']
-        trackers = {name: DiagnosticEdgeTracker(timing['max_trigger_gap_ms'] / 1000) for name in self.config.profiles}
         assignments = [a for a in self.config.raw['assignments'] if a.get('enabled', True)]
+        trackers = {
+            a['name']: DiagnosticEdgeTracker(timing['max_trigger_gap_ms'] / 1000)
+            for a in assignments
+        }
         last_verify = self.clock()
         self.emit({'event': 'dispatcher_ready', 'transport': self.config.transport,
                    'control_mode': self.config.mode, 'dispatcher_state': 'ready',
-                   'message': 'LOW then HIGH starts once; busy presses ignored'})
+                   'stop_sweep_trigger': self.config.stop_sweep_trigger,
+                   'message': 'LOW then HIGH starts once; busy presses ignored; '
+                              'Stop Sweep cooperatively cancels active sweeps'})
         while True:
             ready = []
             for assignment in assignments:
@@ -655,18 +796,40 @@ class Dispatcher:
                 if observation['edge'] != 'steady':
                     self.emit({'event': 'trigger_state', 'assignment': assignment['name'], **observation})
                 if observation['press']:
-                    ready.append((assignment['name'], now))
+                    ready.append((assignment['name'], assignment.get('kind', 'profile'), now))
             if ready:
-                name, observed = ready[0]
-                if self.clock() - observed <= timing['max_trigger_gap_ms'] / 1000:
-                    for ignored, _ in ready[1:]:
-                        self.emit({'event': 'trigger_ignored', 'assignment': ignored,
-                                   'reason': 'config order wins; no queue'})
-                    self.execute_profile(name, trigger_observed=observed)
+                # Prefer Stop Sweep when an active sweep runner exists.
+                stop_presses = [item for item in ready if item[1] == 'stop_sweep']
+                if stop_presses and self._active_sweep_runner is not None:
+                    self._active_sweep_runner.request_cancel('stop_sweep_button')
+                    self.emit({'event': 'stop_sweep_accepted', 'assignment': stop_presses[0][0],
+                               'software_stop_is_not_estop': True})
+                    for ignored, kind, _ in ready:
+                        if kind != 'stop_sweep':
+                            self.emit({'event': 'trigger_ignored', 'assignment': ignored,
+                                       'reason': 'sweep ownership; conflicting manuals not queued'})
+                elif stop_presses and self._active_sweep_runner is None and len(ready) == len(stop_presses):
+                    self.execute_assignment(stop_presses[0][0], trigger_observed=stop_presses[0][2])
                 else:
-                    self.emit({'event': 'trigger_stale', 'assignment': name,
-                               'age_s': self.clock() - observed,
-                               'message': 'Polling other inputs aged out this edge; no run. Apply a fresh LOW then HIGH.'})
+                    # Drop stop_sweep when idle alongside other presses — config order among runnables.
+                    runnables = [item for item in ready if item[1] != 'stop_sweep']
+                    if not runnables:
+                        self.execute_assignment(ready[0][0], trigger_observed=ready[0][2])
+                    else:
+                        name, _kind, observed = runnables[0]
+                        if self.clock() - observed <= timing['max_trigger_gap_ms'] / 1000:
+                            for ignored, _, _ in runnables[1:]:
+                                self.emit({'event': 'trigger_ignored', 'assignment': ignored,
+                                           'reason': 'config order wins; no queue'})
+                            for ignored, kind, _ in ready:
+                                if kind == 'stop_sweep':
+                                    self.emit({'event': 'trigger_ignored', 'assignment': ignored,
+                                               'reason': 'no active sweep to cancel'})
+                            self.execute_assignment(name, trigger_observed=observed)
+                        else:
+                            self.emit({'event': 'trigger_stale', 'assignment': name,
+                                       'age_s': self.clock() - observed,
+                                       'message': 'Polling other inputs aged out this edge; no run. Apply a fresh LOW then HIGH.'})
                 for tracker in trackers.values():
                     tracker.reset()
                 last_verify = self.clock()
@@ -681,15 +844,21 @@ class Dispatcher:
                 self.maybe_poll_telemetry(budget_s=timing['poll_ms'] / 2000)
             self.wait(timing['poll_ms'] / 1000)
 
-    def _run_multi_timeline(self, pattern, apply_values, verify, progress):
-        """Deterministic coordinated playback with serialized per-tick role writes."""
+    def _run_multi_timeline(self, pattern, apply_values, verify, progress, *, wait=None):
+        """Deterministic coordinated playback with serialized per-tick role writes.
+
+        Mandatory phase boundaries are never skipped under lateness: when wall time
+        jumps past several boundaries, each boundary is applied and verified in order
+        before advancing further (brake release / neutral / brake demand transitions).
+        """
         interval_s = self.config.raw['timing']['interval_ms'] / 1000
         max_lateness_s = self.config.raw['timing']['max_lateness_ms'] / 1000
+        sleep = self.wait if wait is None else wait
         # Offline tests inject a multi-aware boundary timeline; stock execute_timeline is scalar-only.
         if self.timeline is not execute_timeline:
             return self.timeline(pattern, apply_values, verify, progress,
                                  interval_s=interval_s, max_lateness_s=max_lateness_s,
-                                 clock=self.clock, wait=self.wait)
+                                 clock=self.clock, wait=sleep)
         started = self.clock()
         deadline = started
         last_values = None
@@ -697,52 +866,127 @@ class Dispatcher:
         last_progress = -math.inf
         skipped = 0
         maximum_lateness = 0.0
+        pending_boundaries = list(pattern.boundaries)
+        configured_interval_ms = interval_s * 1000
+        # Achieved intervals from actual monotonic command timestamps (not schedule diffs).
+        # Active-ramp updates are logged separately from gaps that include intentional holds.
+        achieved_intervals_ms = []
+        active_ramp_intervals_ms = []
+        hold_inclusive_intervals_ms = []
+        last_command_at = None
+        last_command_phase = None
+        missed_deadlines = 0
 
-        def elapsed_at(now):
-            reached = (t for t in pattern.boundaries if now >= started + t)
-            return max(now - started, max(reached, default=0.0))
+        def _phase_is_hold(name):
+            text = (name or '').lower()
+            return (
+                'hold' in text or text in {'transition', 'recovery'} or 'recover' in text)
+
+        def _summarize(samples):
+            if not samples:
+                return configured_interval_ms, configured_interval_ms
+            return sum(samples) / len(samples), max(samples)
+
+        # Catch-up of overdue mandatory boundaries runs synchronously (no sleep), bounded
+        # by the number of remaining boundaries so a logic bug cannot spin forever.
+        catchup_budget = len(pending_boundaries) + 2
 
         while True:
-            self.wait(max(0.0, deadline - self.clock()))
+            sleep(max(0.0, deadline - self.clock()))
             now = self.clock()
             late = max(0.0, now - deadline)
             maximum_lateness = max(maximum_lateness, late)
+            if late > 1e-12:
+                missed_deadlines += 1
             if late > max_lateness_s:
                 raise TimeoutError(f'Pattern update exceeded the lateness limit: {late:.3f}s')
-            elapsed = elapsed_at(now)
+            raw_elapsed = now - started
+            # Cap advance to the next unprocessed mandatory boundary (no skip).
+            at_boundary = bool(pending_boundaries) and raw_elapsed + 1e-12 >= pending_boundaries[0]
+            elapsed = pending_boundaries[0] if at_boundary else raw_elapsed
             values = pattern.values_at(elapsed)
             phase = pattern.phase_at(elapsed)
             operation_started = self.clock()
-            progress_due = phase != last_phase or elapsed - last_progress >= .5
+            progress_due = at_boundary or phase != last_phase or elapsed - last_progress >= .5
             if last_values is None or any(
                     not math.isclose(last_values[role], values[role], abs_tol=1e-12, rel_tol=0)
                     for role in pattern.roles):
                 apply_values(values)
+                command_at = self.clock()
+                if last_command_at is not None:
+                    delta_ms = max(0.0, (command_at - last_command_at) * 1000)
+                    achieved_intervals_ms.append(delta_ms)
+                    # Continuous ramp/release updates vs gaps that span intentional holds.
+                    if (not _phase_is_hold(last_command_phase) and not _phase_is_hold(phase)
+                            and delta_ms <= configured_interval_ms * 2.5):
+                        active_ramp_intervals_ms.append(delta_ms)
+                    else:
+                        hold_inclusive_intervals_ms.append(delta_ms)
+                last_command_at = command_at
+                last_command_phase = phase
                 last_values = dict(values)
-            if progress_due:
+            if progress_due or at_boundary:
                 verify(values)
-                progress({'event': 'progress', 'phase': phase, 'elapsed_s': elapsed,
-                          'nominal_duration_s': pattern.duration_s, 'requested': values,
-                          'lateness_ms': late * 1000,
-                          'io_ms': (self.clock() - operation_started) * 1000})
+                mean_so_far, max_so_far = _summarize(achieved_intervals_ms)
+                ramp_mean, ramp_max = _summarize(active_ramp_intervals_ms)
+                hold_mean, hold_max = _summarize(hold_inclusive_intervals_ms)
+                progress({
+                    'event': 'progress', 'phase': phase, 'elapsed_s': elapsed,
+                    'nominal_duration_s': pattern.duration_s, 'requested': values,
+                    'lateness_ms': late * 1000,
+                    'io_ms': (self.clock() - operation_started) * 1000,
+                    'configured_interval_ms': configured_interval_ms,
+                    'achieved_interval_ms': mean_so_far,
+                    'achieved_interval_max_ms': max_so_far,
+                    'achieved_ramp_interval_ms': ramp_mean,
+                    'achieved_ramp_interval_max_ms': ramp_max,
+                    'achieved_hold_inclusive_interval_ms': hold_mean,
+                    'achieved_hold_inclusive_interval_max_ms': hold_max,
+                    'missed_deadlines': missed_deadlines,
+                    'mandatory_boundary': at_boundary,
+                })
                 last_progress = elapsed
                 last_phase = phase
-            if elapsed >= pattern.duration_s:
+            if at_boundary:
+                pending_boundaries.pop(0)
+                catchup_budget -= 1
+            if elapsed + 1e-12 >= pattern.duration_s and not pending_boundaries:
                 actual_elapsed = self.clock() - started
                 completion_lateness = max(0.0, actual_elapsed - pattern.duration_s)
                 if completion_lateness > max_lateness_s:
                     raise TimeoutError(
                         f'Final setpoint acknowledgement exceeded the completion limit: {completion_lateness:.3f}s')
-                return {'nominal_duration_s': pattern.duration_s, 'actual_elapsed_s': actual_elapsed,
-                        'completion_lateness_ms': completion_lateness * 1000,
-                        'skipped_update_slots': skipped, 'maximum_lateness_ms': maximum_lateness * 1000}
-            after = elapsed_at(self.clock())
+                mean_achieved, max_achieved = _summarize(achieved_intervals_ms)
+                ramp_mean, ramp_max = _summarize(active_ramp_intervals_ms)
+                hold_mean, hold_max = _summarize(hold_inclusive_intervals_ms)
+                return {
+                    'nominal_duration_s': pattern.duration_s, 'actual_elapsed_s': actual_elapsed,
+                    'completion_lateness_ms': completion_lateness * 1000,
+                    'skipped_update_slots': skipped, 'maximum_lateness_ms': maximum_lateness * 1000,
+                    'configured_interval_ms': configured_interval_ms,
+                    'achieved_interval_ms': mean_achieved,
+                    'achieved_interval_max_ms': max_achieved,
+                    'achieved_ramp_interval_ms': ramp_mean,
+                    'achieved_ramp_interval_max_ms': ramp_max,
+                    'achieved_hold_inclusive_interval_ms': hold_mean,
+                    'achieved_hold_inclusive_interval_max_ms': hold_max,
+                    'missed_deadlines': missed_deadlines,
+                }
+            after = elapsed
+            # If more mandatory boundaries are already due, process the next one immediately.
+            if pending_boundaries and (self.clock() - started) + 1e-12 >= pending_boundaries[0]:
+                if catchup_budget < 0:
+                    raise TimeoutError('Mandatory boundary catch-up exceeded budget; refusing to spin')
+                deadline = self.clock()
+                continue
+            catchup_budget = len(pending_boundaries) + 2
             due_index = math.floor(max(0, after) / interval_s + 1e-9) + 1
             prior_index = math.floor(max(0, elapsed) / interval_s + 1e-9)
             skipped += max(0, due_index - prior_index - 1)
             future = [due_index * interval_s, pattern.duration_s]
-            future.extend(t for t in pattern.boundaries if t > after)
-            deadline = started + min(future)
+            future.extend(t for t in pending_boundaries if t > after + 1e-12)
+            next_deadline = started + min(future)
+            deadline = next_deadline
 
     def cleanup(self):
         safe = True

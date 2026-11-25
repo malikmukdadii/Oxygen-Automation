@@ -98,6 +98,14 @@ class DispatcherConfig:
     path: Path
     raw: dict
     profiles: dict[str, Profile]
+    motor_sweeps: dict = None  # name -> MotorSweepConfig
+    fast_regens: dict = None  # name -> FastRegenConfig
+    stop_sweep_trigger: str | None = None
+
+    def __post_init__(self):
+        # dataclasses with mutable defaults: normalize None to empty dicts
+        object.__setattr__(self, 'motor_sweeps', dict(self.motor_sweeps or {}))
+        object.__setattr__(self, 'fast_regens', dict(self.fast_regens or {}))
 
     @property
     def mode(self) -> str:
@@ -472,6 +480,7 @@ def load_dispatcher_config(path) -> DispatcherConfig:
         'schema_version', 'control', 'transport', 'connection', 'outputs', 'timing',
         'measurements', 'interlocks', 'recording', 'instruments', 'live_control',
         'assignments', 'simulation', 'hardware_authorization', 'open_loop_authorization',
+        'motor_sweep_defaults',
     }
     keys(raw, root, 'dispatcher v3')
     control = raw.get('control')
@@ -552,10 +561,11 @@ def load_dispatcher_config(path) -> DispatcherConfig:
     keys(timing, {
         'poll_ms', 'max_trigger_gap_ms', 'interval_ms', 'max_lateness_ms', 'telemetry_poll_ms',
     }, 'timing')
-    poll = number(timing['poll_ms'], 'poll_ms', 20, 250)
-    if number(timing['max_trigger_gap_ms'], 'max_trigger_gap_ms', 20, 1000) <= poll:
+    # Sweep-oriented defaults use 20 ms; schema floor is 10 ms (independently configurable).
+    poll = number(timing['poll_ms'], 'poll_ms', 10, 250)
+    if number(timing['max_trigger_gap_ms'], 'max_trigger_gap_ms', 10, 1000) <= poll:
         raise ConfigError('Maximum gap must exceed polling interval')
-    number(timing['interval_ms'], 'interval_ms', 20, 250)
+    number(timing['interval_ms'], 'interval_ms', 10, 250)
     number(timing['max_lateness_ms'], 'max_lateness_ms', 1, 1000)
 
     measurements = raw.get('measurements', {})
@@ -567,7 +577,9 @@ def load_dispatcher_config(path) -> DispatcherConfig:
 
     def _validate_measurement_entry(name, measurement, *, require_verified: bool):
         keys(measurement, {'kind', 'unit', 'channel', 'property', 'mapping_verified'}, name)
-        expected_kind = 'number' if name == 'dc_bus_voltage' else 'boolean'
+        # Supervisory sweep channels (open-loop global mode) may declare numeric RPM/bus.
+        numeric_roles = {'dc_bus_voltage', 'erpm', 'rpm', 'motor_rpm', 'electrical_rpm'}
+        expected_kind = 'number' if name in numeric_roles else 'boolean'
         if measurement.get('kind') != expected_kind:
             raise ConfigError(f'{name}: kind mismatch')
         if require_verified:
@@ -579,10 +591,18 @@ def load_dispatcher_config(path) -> DispatcherConfig:
             if name == 'dc_bus_voltage':
                 if measurement.get('unit') != 'V' or measurement.get('property') is not None:
                     raise ConfigError('DC bus uses numeric measurement channel in V')
+            elif name in numeric_roles - {'dc_bus_voltage'}:
+                if measurement.get('unit') not in {'rpm', 'erpm', '1/min'} or measurement.get('property') is not None:
+                    raise ConfigError(f'{name}: numeric RPM channel uses unit rpm/erpm/1/min')
             else:
                 exact_name(measurement.get('property'), f'{name} Boolean property')
         elif measurement.get('mapping_verified') is not False:
             raise ConfigError('Simulated/open-loop logging measurement mappings remain unverified')
+        elif name in numeric_roles and name != 'dc_bus_voltage':
+            # Open-loop / simulated supervisory RPM: unit optional but must be coherent when set.
+            unit = measurement.get('unit')
+            if unit is not None and unit not in {'rpm', 'erpm', '1/min'}:
+                raise ConfigError(f'{name}: unit must be rpm, erpm, or 1/min when declared')
 
     if open_loop:
         # Optional logging-only channels; never required for control.
@@ -612,7 +632,7 @@ def load_dispatcher_config(path) -> DispatcherConfig:
     base = {'one_active_profile_global', 'external_emergency_stop_required_for_live'}
     cross = {
         'motor_supply_demand_v', 'supply_down_requires_motor_neutral', 'require_supply_demand_before_motor',
-        'motor_supply_demands_v', 'supply_demand_grid_commissioned',
+        'motor_supply_demands_v', 'supply_demand_grid_commissioned', 'supply_demand_step_v',
     }
     drive_brake = {'drive_brake_mutual_exclusion', 'zero_drive_before_brake', 'release_brake_before_drive'}
     feedback_keys = {
@@ -647,16 +667,26 @@ def load_dispatcher_config(path) -> DispatcherConfig:
                 '(true = verify motor neutral before supply motion)')
         if type(interlocks.get('require_supply_demand_before_motor')) is not bool:
             raise ConfigError('require_supply_demand_before_motor must be Boolean (default true in examples)')
+        step_v = interlocks.get('supply_demand_step_v', 0.5)
+        if step_v not in (0.05, 0.1, 0.25, 0.5, 1.0):
+            raise ConfigError('supply_demand_step_v must be one of 0.05, 0.1, 0.25, 0.5, 1.0')
+        # Relative manual RZ-XA steps remain on the fixed 0.5 V SUPPLY_DEMAND_GRID.
+        # Motor prerequisites may list a finer commissioned grid (e.g. 0.25 V sweeps).
+        from .voltage_grid import bus_to_aout, generate_voltage_points
+        fine_grid = tuple(
+            bus_to_aout(v) for v in generate_voltage_points(36.0, 40.0, step_v))
         if 'motor_supply_demands_v' in interlocks:
             demands = interlocks['motor_supply_demands_v']
             if 'motor_supply_demand_v' in interlocks:
                 raise ConfigError('Choose scalar motor_supply_demand_v or discrete motor_supply_demands_v, not both')
-            if not isinstance(demands, list) or not demands or len(demands) > 9:
-                raise ConfigError('motor_supply_demands_v needs 1..9 commissioned discrete demands')
+            if not isinstance(demands, list) or not demands or len(demands) > 64:
+                raise ConfigError('motor_supply_demands_v needs 1..64 commissioned discrete demands')
             for value in demands:
                 number(value, 'commissioned supply demand', 0, outputs[SUPPLY]['max_aout_v'])
-                if value not in SUPPLY_DEMAND_GRID:
-                    raise ConfigError('Motor supply demand is outside the commissioned 36..40 V / 0.5 V grid')
+                if not any(math.isclose(value, allowed, abs_tol=1e-9, rel_tol=0) for allowed in fine_grid):
+                    raise ConfigError(
+                        f'Motor supply demand {value} is outside the commissioned 36..40 V / '
+                        f'{step_v} V grid')
             if len(set(demands)) != len(demands):
                 raise ConfigError('Duplicate commissioned supply demands')
             if not open_loop:
@@ -743,28 +773,127 @@ def load_dispatcher_config(path) -> DispatcherConfig:
         raw['simulation'] = {}
 
     assignments = raw.get('assignments')
-    if not isinstance(assignments, list) or not 1 <= len(assignments) <= 8:
-        raise ConfigError('Provide 1..8 assignments')
+    # Raised from 8 → 16 so CES eight-button set can coexist with additive sweep buttons.
+    if not isinstance(assignments, list) or not 1 <= len(assignments) <= 16:
+        raise ConfigError('Provide 1..16 assignments')
     profiles, triggers = {}, set()
+    motor_sweeps, fast_regens = {}, {}
+    stop_sweep_trigger = None
+    enabled_count = 0
     sensor_names = {m.get('channel') for m in measurements.values() if isinstance(m, dict) and m.get('channel')}
     output_names = {s.get('channel') for s in outputs.values() if s.get('channel')}
+    defaults = raw.get('motor_sweep_defaults') or {}
+    if defaults and not isinstance(defaults, dict):
+        raise ConfigError('motor_sweep_defaults must be an object')
     for assignment in assignments:
-        keys(assignment, {'name', 'enabled', 'trigger', 'output', 'profile', 'parameters'}, 'assignment')
+        keys(assignment, {
+            'name', 'enabled', 'trigger', 'output', 'profile', 'parameters',
+            'kind', 'motor_sweep', 'fast_regen',
+        }, 'assignment')
         if type(assignment.get('enabled', True)) is not bool:
             raise ConfigError('Assignment enabled must be Boolean')
         if not assignment.get('enabled', True):
             continue
+        enabled_count += 1
         name = exact_name(assignment.get('name'), 'assignment name')
         trigger = exact_name(assignment.get('trigger'), 'DOUT trigger')
-        if name in profiles or trigger in triggers or trigger in output_names | sensor_names:
-            raise ConfigError('Assignment names/triggers must be unique and independent of outputs')
+        kind = assignment.get('kind', 'profile')
+        if kind not in {'profile', 'motor_sweep', 'fast_regen', 'stop_sweep'}:
+            raise ConfigError(
+                "assignment.kind must be 'profile', 'motor_sweep', 'fast_regen', or 'stop_sweep'")
+        if name in profiles or name in motor_sweeps or name in fast_regens or (
+                kind == 'stop_sweep' and stop_sweep_trigger is not None):
+            raise ConfigError('Assignment names must be unique')
+        if trigger in triggers or trigger in output_names | sensor_names:
+            raise ConfigError('Assignment triggers must be unique and independent of outputs')
+        triggers.add(trigger)
+
+        if kind == 'stop_sweep':
+            if stop_sweep_trigger is not None:
+                raise ConfigError('Only one stop_sweep assignment is allowed')
+            if assignment.get('profile') or assignment.get('motor_sweep') or assignment.get('fast_regen'):
+                raise ConfigError('stop_sweep assignments do not take profile/motor_sweep/fast_regen')
+            if assignment.get('output') not in (None, MOTOR, SUPPLY, BRAKE):
+                raise ConfigError('stop_sweep output is optional and informational only')
+            stop_sweep_trigger = trigger
+            continue
+
         output = assignment.get('output')
         if output not in outputs:
             raise ConfigError('Unknown output role')
+
+        if kind == 'motor_sweep':
+            if output != MOTOR:
+                raise ConfigError('motor_sweep assignments must use output vesc_throttle')
+            if SUPPLY not in outputs or BRAKE not in outputs:
+                raise ConfigError('motor_sweep requires supply, throttle, and brake roles')
+            if assignment.get('profile'):
+                raise ConfigError('motor_sweep assignments use motor_sweep config, not profile')
+            from .motor_sweep import deep_merge, parse_motor_sweep
+            # Documented deep-merge: nested fast_regen / voltage_qualify / rpm_feedback
+            # assignment keys override motor_sweep_defaults without wiping siblings.
+            merged = deep_merge(defaults, assignment.get('motor_sweep') or {})
+            parameters = assignment.get('parameters') or {}
+            if isinstance(parameters, dict) and 'brake_target_v' in parameters:
+                # Explicit assignment brake_target_v overrides shared Fast Regen defaults.
+                fr = dict(merged.get('fast_regen') or {})
+                fr['brake_target_v'] = parameters['brake_target_v']
+                merged['fast_regen'] = fr
+            if 'mode' not in merged:
+                raise ConfigError(f'{name}: motor_sweep.mode is required')
+            # Validate feedback channels exist before the assignment starts
+            # (open-loop assignments do not require V/RPM channels).
+            sweep_cfg = parse_motor_sweep(merged, outputs=outputs)
+            if sweep_cfg.voltage_qualify is not None:
+                channel = sweep_cfg.voltage_qualify.channel
+                if channel not in measurements:
+                    raise ConfigError(
+                        f'{name}: voltage_qualify channel {channel!r} must be declared under measurements')
+            if sweep_cfg.rpm_feedback is not None:
+                channel = sweep_cfg.rpm_feedback.channel
+                if channel not in measurements:
+                    raise ConfigError(
+                        f'{name}: rpm_feedback channel {channel!r} must be declared under measurements')
+            motor_sweeps[name] = sweep_cfg
+            continue
+
+        if kind == 'fast_regen':
+            if output != MOTOR:
+                raise ConfigError('fast_regen assignments must use output vesc_throttle')
+            if BRAKE not in outputs:
+                raise ConfigError('fast_regen requires vesc_brake')
+            if assignment.get('profile'):
+                raise ConfigError('fast_regen assignments use fast_regen config, not profile')
+            from .fast_regen import parse_fast_regen
+            from .motor_sweep import deep_merge
+            # Same deep-merge semantics as motor_sweep: defaults ← assignment.fast_regen.
+            base = defaults.get('fast_regen') or {}
+            override = assignment.get('fast_regen') or {}
+            if base and not isinstance(base, dict):
+                raise ConfigError('motor_sweep_defaults.fast_regen must be an object')
+            if override and not isinstance(override, dict):
+                raise ConfigError(f'{name}: fast_regen must be an object')
+            regen_raw = deep_merge(dict(base) if isinstance(base, dict) else {},
+                                   dict(override) if isinstance(override, dict) else {})
+            parameters = assignment.get('parameters') or {}
+            if isinstance(parameters, dict) and 'brake_target_v' in parameters:
+                # Explicit assignment brake_target_v always overrides shared Fast Regen defaults.
+                regen_raw['brake_target_v'] = parameters['brake_target_v']
+            fast_regens[name] = parse_fast_regen(
+                regen_raw,
+                motor_max_v=outputs[MOTOR]['max_aout_v'],
+                brake_max_v=outputs[BRAKE].get('brake_max_aout_v', outputs[BRAKE]['max_aout_v']),
+                brake_release_v=outputs[BRAKE]['brake_release_aout_v'],
+            )
+            continue
+
+        # Default: classic profile assignment
         filename = exact_name(assignment.get('profile'), 'profile path')
         parameters = assignment.get('parameters', {})
         if not isinstance(parameters, dict):
             raise ConfigError(f'{name}: assignment parameters must be an object of finite JSON numbers')
+        if assignment.get('motor_sweep') or assignment.get('fast_regen'):
+            raise ConfigError(f'{name}: profile assignments cannot declare motor_sweep/fast_regen')
         profile = load_profile(
             path.parent / filename, output, outputs[output], open_loop=open_loop,
             configured_outputs=outputs, parameters=parameters)
@@ -791,7 +920,13 @@ def load_dispatcher_config(path) -> DispatcherConfig:
             # Motor-only is allowed; cross-role supply demand is gated by interlocks, not profile load.
             pass
         profiles[name] = profile
-        triggers.add(trigger)
-    if not profiles:
+    if enabled_count < 1:
         raise ConfigError('At least one enabled assignment is required')
-    return DispatcherConfig(path, raw, profiles)
+    if not profiles and not motor_sweeps and not fast_regens:
+        raise ConfigError('At least one runnable assignment (profile, motor_sweep, or fast_regen) is required')
+    return DispatcherConfig(
+        path, raw, profiles,
+        motor_sweeps=motor_sweeps,
+        fast_regens=fast_regens,
+        stop_sweep_trigger=stop_sweep_trigger,
+    )

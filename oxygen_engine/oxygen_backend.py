@@ -16,12 +16,25 @@ from .schema import ABSOLUTE_AOUT_MAX_V, number
 from .scpi_transport import ScpiCommandError, ScpiProtocolError, ScpiTransport, parse_scpi, quote_scpi
 
 
+NUMERIC_MEASUREMENT_UNITS = {
+    'dc_bus_voltage': 'V',
+    'erpm': ('rpm', 'erpm', '1/min'),
+    'rpm': ('rpm', 'erpm', '1/min'),
+    'motor_rpm': ('rpm', 'erpm', '1/min'),
+    'electrical_rpm': ('rpm', 'erpm', '1/min'),
+}
+
+
 @dataclass(frozen=True)
 class Sample:
     value: float | bool
     sampled_at: float
     source: str
     simulated: bool = False
+    acquisition_time_s: float | None = None
+    sequence: int | None = None
+    freshness: str = 'host_scpi'  # host_scpi until OXYGEN exposes acquisition stamps on this path
+    pinned: bool = False
 
 
 class OxygenTransport(ScpiTransport):
@@ -220,6 +233,8 @@ class OxygenBackend:
         self.do_channels = {}
         self._session = None
         self.full_discover_count = 0
+        self._numeric_order = ()
+        self._measure_seq = 0
 
     @property
     def connected(self):
@@ -285,7 +300,8 @@ class OxygenBackend:
                     if key not in self.input_ids:
                         continue
                     cid = self.input_ids[key][1]
-                    prop = 'Unit' if name == 'dc_bus_voltage' else spec.get('property')
+                    kind = spec.get('kind')
+                    prop = 'Unit' if kind == 'number' else spec.get('property')
                     if prop and prop not in self.adapter.list_properties(cid):
                         if self.open_loop:
                             self.emit({
@@ -296,10 +312,35 @@ class OxygenBackend:
                             self.input_ids.pop(key, None)
                             continue
                         raise ScpiProtocolError(f'{name}: configured input property {prop!r} is unavailable')
-                # Enable numeric reads for optional open-loop logging and closed-loop control.
-                if 'dc_bus_voltage' in measurements and measurements['dc_bus_voltage'].get('channel'):
-                    if 'sensor:dc_bus_voltage' in self.input_ids:
-                        self.transport.numeric_name = measurements['dc_bus_voltage']['channel']
+                # Batch-enable numeric reads for bus/RPM (and any other kind=number roles).
+                numeric_names = []
+                for name, spec in measurements.items():
+                    if spec.get('kind') != 'number' or not spec.get('channel'):
+                        continue
+                    if 'sensor:' + name not in self.input_ids:
+                        continue
+                    numeric_names.append(spec['channel'])
+                if numeric_names:
+                    # Prefer multi-item selection; keep legacy single numeric_name for bus-only configs.
+                    self.transport.experiment_numeric_names = tuple(numeric_names)
+                    self.transport.numeric_name = numeric_names[0]
+                    self._numeric_order = tuple(
+                        name for name, spec in measurements.items()
+                        if spec.get('kind') == 'number' and spec.get('channel')
+                        and 'sensor:' + name in self.input_ids)
+                    try:
+                        self.adapter.configure_numeric_measurements(list(numeric_names))
+                    except Exception as exc:
+                        if self.open_loop:
+                            self.emit({
+                                'event': 'telemetry_unavailable', 'names': numeric_names,
+                                'warning': True, 'logging_only': True, 'error': str(exc),
+                                'message': 'Numeric measurement selection unavailable; AOUT continues',
+                            })
+                        else:
+                            raise
+                else:
+                    self._numeric_order = ()
             for assignment in self.config.raw['assignments']:
                 if assignment.get('enabled', True):
                     name = assignment['trigger']
@@ -449,6 +490,18 @@ class OxygenBackend:
             self.error()
             return result
 
+    def _expected_numeric_units(self, name, spec):
+        configured = spec.get('unit')
+        if name == 'dc_bus_voltage':
+            return ('V',) if configured in (None, 'V') else (configured,)
+        allowed = NUMERIC_MEASUREMENT_UNITS.get(name)
+        if allowed is None:
+            # Generic numeric supervisory channel: honor configured unit when present.
+            return (configured,) if configured else None
+        if configured is None:
+            return allowed if isinstance(allowed, tuple) else (allowed,)
+        return (configured,)
+
     def measure(self, name):
         with self.lock:
             measurements = self.config.raw.get('measurements', {})
@@ -466,23 +519,49 @@ class OxygenBackend:
             if self.open_loop:
                 self.transport.soft_telemetry = True
             try:
-                if name == 'dc_bus_voltage':
+                kind = spec.get('kind')
+                if kind == 'number':
                     unit = self.adapter.get_property_value(cid, 'Unit')
-                    if unit.kind != 'STRING' or unit.values != ('V',):
-                        raise InterlockError('Bus channel unit is not V')
-                    if not self.open_loop:
-                        if self.adapter.acquisition_state() != 'Started':
-                            raise ScpiProtocolError('Real bus channel must be in V with acquisition Started')
-                    if self.transport.numeric_name is None:
-                        self.transport.numeric_name = spec['channel']
-                    value = self.adapter.read_measurements([spec['channel']])[0]
+                    expected = self._expected_numeric_units(name, spec)
+                    if unit.kind != 'STRING' or (expected and unit.values[0] not in expected):
+                        raise InterlockError(
+                            f'{name}: unit {unit.values!r} not in {expected!r}')
+                    if not self.open_loop or name in getattr(self, '_numeric_order', ()):
+                        state = self.adapter.acquisition_state()
+                        if state != 'Started':
+                            raise InterlockError(
+                                f'{name}: acquisition state {state!r} (require Started); '
+                                'identity/freshness not established')
+                    order = getattr(self, '_numeric_order', ()) or ()
+                    if order and name in order and self.transport.experiment_numeric_names:
+                        # Batch read already-selected numeric transfer list.
+                        values = self.adapter.read_selected_measurements(len(order))
+                        value = values[order.index(name)]
+                    else:
+                        if self.transport.numeric_name is None:
+                            self.transport.numeric_name = spec['channel']
+                        value = self.adapter.read_measurements([spec['channel']])[0]
                     if not math.isfinite(value):
-                        raise InterlockError('Nonfinite measured bus voltage')
-                else:
-                    value = self._boolean(cid, spec['property'])
+                        raise InterlockError(f'Nonfinite measured value for {name}')
+                    # Limitation: this SCPI path does not expose a per-sample acquisition
+                    # timestamp with :NUMeric:NORMal:VALue?. Host completion time and the
+                    # local query counter (`sequence`) are NOT verified acquisition freshness.
+                    # Callers may use them only for host-side sample-change detection.
+                    seq = getattr(self, '_measure_seq', 0) + 1
+                    self._measure_seq = seq
+                    self.error()
+                    return Sample(
+                        value, started,
+                        f'OXYGEN {cid}/numeric',
+                        simulated=not self.physical,
+                        acquisition_time_s=None,
+                        sequence=seq,
+                        freshness='host_scpi',
+                    )
+                value = self._boolean(cid, spec['property'])
                 self.error()
-                return Sample(value, started, f'OXYGEN {cid}/{spec.get("property") or "numeric"}',
-                              simulated=not self.physical)
+                return Sample(value, started, f'OXYGEN {cid}/{spec.get("property")}',
+                              simulated=not self.physical, freshness='host_scpi')
             except InterlockError:
                 raise
             except Exception as exc:
