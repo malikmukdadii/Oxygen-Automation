@@ -41,8 +41,8 @@
   "additive_assignments": [
     {"name": "fast_regen_test", "kind": "fast_regen", "trigger": "<exact DOUT>", "output": "vesc_throttle", "parameters": {"brake_target_v": 0.20}},
     {"name": "motor_sweep_open_loop", "kind": "motor_sweep", "trigger": "<exact DOUT>", "output": "vesc_throttle", "motor_sweep": {"mode": "open_loop", "round_trips": 1}},
-    {"name": "motor_sweep_voltage_closed_loop", "kind": "motor_sweep", "trigger": "<exact DOUT>", "output": "vesc_throttle", "motor_sweep": {"mode": "voltage_closed_loop", "round_trips": 1}},
-    {"name": "motor_sweep_full_closed_loop", "kind": "motor_sweep", "trigger": "<exact DOUT>", "output": "vesc_throttle", "motor_sweep": {"mode": "full_closed_loop", "round_trips": 1, "fast_regen": {"accel_rpm_target": null, "brake_rpm_target": null}}},
+    {"name": "motor_sweep_voltage_closed_loop", "enabled": false, "kind": "motor_sweep", "trigger": "<exact DOUT>", "output": "vesc_throttle", "motor_sweep": {"mode": "voltage_closed_loop", "round_trips": 1}},
+    {"name": "motor_sweep_full_closed_loop", "enabled": false, "kind": "motor_sweep", "trigger": "<exact DOUT>", "output": "vesc_throttle", "motor_sweep": {"mode": "full_closed_loop", "round_trips": 1, "fast_regen": {"accel_rpm_target": null, "brake_rpm_target": null}}},
     {"name": "stop_sweep", "kind": "stop_sweep", "trigger": "<exact DOUT>", "output": "vesc_throttle"}
   ]
 }

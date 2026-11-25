@@ -322,13 +322,24 @@ class SweepResult:
 
 
 def _sample_freshness_key(sample) -> tuple:
+    """Key for detecting sample *change* only.
+
+    Host-SCPI timestamps and query-sequence counters are **not** verified acquisition
+    freshness. Only ``freshness == 'acquisition'`` with ``acquisition_time_s`` counts as
+    acquisition-domain identity; otherwise the key is explicitly ``host_scpi``.
+    """
+    freshness = getattr(sample, 'freshness', 'host_scpi')
     acq = getattr(sample, 'acquisition_time_s', None)
     seq = getattr(sample, 'sequence', None)
-    if acq is not None:
+    if freshness == 'acquisition' and acq is not None:
         return ('acquisition', acq, seq if seq is not None else -1)
-    if seq is not None:
-        return ('sequence', seq, sample.sampled_at)
-    return ('host_scpi', sample.sampled_at, -1)
+    # Host query stamp/sequence — change detection only; never claim acquisition verified.
+    return ('host_scpi', sample.sampled_at, seq if seq is not None else -1)
+
+
+def _acquisition_freshness_verified(sample) -> bool:
+    return (getattr(sample, 'freshness', 'host_scpi') == 'acquisition'
+            and getattr(sample, 'acquisition_time_s', None) is not None)
 
 
 class MotorSweepRunner:
@@ -478,12 +489,15 @@ class MotorSweepRunner:
                     f'(target {context.bus_target_v} ± {cfg.tolerance_v} V); '
                     'no silent open-loop fallback')
             sample = self.dispatcher.sample_supervisory(cfg.channel, max_age=cfg.max_age_s)
-            if getattr(sample, 'acquisition_time_s', None) is None and freshness_note is None:
+            if not _acquisition_freshness_verified(sample) and freshness_note is None:
                 freshness_note = (
-                    'limitation: acquisition timestamp not available on this SCPI numeric path; '
-                    'qualify uses advancing host-SCPI sample stamps/sequence only')
-                self._emit({'event': 'sweep_freshness_limitation', 'message': freshness_note,
-                            'freshness': getattr(sample, 'freshness', 'host_scpi')})
+                    'limitation: host SCPI timestamps / query sequence are not verified '
+                    'acquisition freshness; qualify uses host-side sample change only')
+                self._emit({
+                    'event': 'sweep_freshness_limitation', 'message': freshness_note,
+                    'freshness': getattr(sample, 'freshness', 'host_scpi'),
+                    'acquisition_freshness_verified': False,
+                })
             measured = float(sample.value)
             context.measured_bus_v = measured
             advancing = self._is_advancing(sample, last_fresh_key)
@@ -508,6 +522,7 @@ class MotorSweepRunner:
                         'physical_voltage_established': True,
                         'supervisory_only': True,
                         'freshness': getattr(sample, 'freshness', 'host_scpi'),
+                        'acquisition_freshness_verified': _acquisition_freshness_verified(sample),
                     })
                     return measured
             self._wait(cfg.poll_s, phase='voltage_qualify')
@@ -569,6 +584,7 @@ class MotorSweepRunner:
                 raise SweepFault(
                     'full_closed_loop requires accel_rpm_target and brake_rpm_target; '
                     'no silent fallback to timed open-loop')
+            self._preflight_full_closed_loop(accel_target, brake_target)
             result = self._run_fast_regen_rpm_governed(
                 pattern, context, supply_before, accel_target, brake_target)
         else:
@@ -647,6 +663,39 @@ class MotorSweepRunner:
 
     def _rpm_compare_brake(self, rpm, target, cfg: RpmFeedbackConfig) -> bool:
         return rpm <= (target + cfg.rpm_tolerance)
+
+    def _preflight_full_closed_loop(self, accel_target: float, brake_target: float):
+        """Validate RPM ordering, domains, pole-pairs, and feedback before first motor/brake write."""
+        cfg = self.config.rpm_feedback
+        fr = self.config.fast_regen
+        assert cfg is not None
+        if accel_target <= brake_target:
+            raise SweepFault(
+                f'full_closed_loop RPM ordering invalid: accel_rpm_target ({accel_target}) '
+                f'must be greater than brake_rpm_target ({brake_target})')
+        measured_kind = cfg.kind
+        target_kind = fr.rpm_kind
+        if measured_kind not in {'electrical', 'mechanical'}:
+            raise SweepFault(f'rpm_feedback.kind invalid: {measured_kind!r}')
+        if target_kind not in {'electrical', 'mechanical'}:
+            raise SweepFault(f'fast_regen.rpm_kind invalid: {target_kind!r}')
+        pairs = fr.pole_pairs or cfg.pole_pairs
+        if measured_kind != target_kind and pairs is None:
+            raise SweepFault(
+                f'pole_pairs required before first output to convert {measured_kind} ↔ {target_kind}')
+        # Feedback availability — fail closed before commanding motor/brake.
+        sample = self.dispatcher.sample_supervisory(cfg.channel, max_age=cfg.max_age_s)
+        number(sample.value, cfg.channel, -1_000_000, 1_000_000)
+        self._emit({
+            'event': 'sweep_full_closed_loop_preflight_ok',
+            'accel_rpm_target': accel_target,
+            'brake_rpm_target': brake_target,
+            'measured_kind': measured_kind,
+            'target_kind': target_kind,
+            'pole_pairs': pairs,
+            'feedback_channel': cfg.channel,
+            'acquisition_freshness_verified': _acquisition_freshness_verified(sample),
+        })
 
     def _run_fast_regen_rpm_governed(self, pattern: MultiOutputPattern, context: SweepContext,
                                      supply_before: float, accel_target: float,
@@ -749,17 +798,24 @@ class MotorSweepRunner:
 
         def ramp(role, start_v, end_v, duration_s, phase, other_safe, rpm_target=None, compare=None,
                  timeout_s=None):
+            """Ramp toward end_v. Returns (current_command_v, early_rpm_qualified).
+
+            On early RPM qualify during accel/brake: keep the current acknowledged
+            command — do **not** jump to the full target. Caller transitions from
+            that current value toward neutral/release and skips hold reapplication.
+            """
             # Boundary: confirm safe other channel before ramp starts.
             if role == MOTOR:
                 set_outputs(start_v, other_safe, phase, verify_boundary=True)
             else:
                 set_outputs(other_safe, start_v, phase, verify_boundary=True)
+            current = start_v
             if duration_s <= 0:
                 if role == MOTOR:
                     set_outputs(end_v, other_safe, phase, verify_boundary=True)
                 else:
                     set_outputs(other_safe, end_v, phase, verify_boundary=True)
-                return
+                return end_v, False
             began = d.clock()
             while True:
                 self._raise_if_cancelled(phase)
@@ -767,25 +823,34 @@ class MotorSweepRunner:
                 elapsed = d.clock() - began
                 frac = 1.0 if elapsed >= duration_s else elapsed / duration_s
                 value = start_v + (end_v - start_v) * frac
+                current = value
                 if role == MOTOR:
                     set_outputs(value, other_safe, phase, verify_boundary=False)
                 else:
                     set_outputs(other_safe, value, phase, verify_boundary=False)
                 if cfg.monitor_during_ramps and rpm_target is not None and compare is not None:
                     rpm, sample = read_rpm()
-                    self._emit({'event': 'sweep_rpm_sample', 'phase': phase, 'rpm': rpm,
-                                'target_rpm': rpm_target, 'trial_id': context.trial_id,
-                                'during_ramp': True,
-                                'freshness': getattr(sample, 'freshness', 'host_scpi')})
+                    self._emit({
+                        'event': 'sweep_rpm_sample', 'phase': phase, 'rpm': rpm,
+                        'target_rpm': rpm_target, 'trial_id': context.trial_id,
+                        'during_ramp': True,
+                        'freshness': getattr(sample, 'freshness', 'host_scpi'),
+                        'acquisition_freshness_verified': _acquisition_freshness_verified(sample),
+                    })
                     if compare(rpm, rpm_target, cfg):
-                        # Early complete ramp to end setpoint, then ack boundary.
+                        # Hold current command — no jump to full target.
                         if role == MOTOR:
-                            set_outputs(end_v, other_safe, phase, verify_boundary=True)
+                            set_outputs(current, other_safe, phase, verify_boundary=True)
                         else:
-                            set_outputs(other_safe, end_v, phase, verify_boundary=True)
-                        self._emit({'event': 'sweep_rpm_target_reached', 'phase': phase,
-                                    'rpm': rpm, 'target_rpm': rpm_target, 'during_ramp': True})
-                        return
+                            set_outputs(other_safe, current, phase, verify_boundary=True)
+                        self._emit({
+                            'event': 'sweep_rpm_target_reached', 'phase': phase,
+                            'rpm': rpm, 'target_rpm': rpm_target, 'during_ramp': True,
+                            'command_at_qualify_v': current,
+                            'full_target_v': end_v,
+                            'jumped_to_full_target': False,
+                        })
+                        return current, True
                     if timeout_s is not None and d.clock() - began > timeout_s:
                         raise SweepFault(
                             f'RPM target not reached during {phase} within {timeout_s}s')
@@ -794,22 +859,34 @@ class MotorSweepRunner:
                         set_outputs(end_v, other_safe, phase, verify_boundary=True)
                     else:
                         set_outputs(other_safe, end_v, phase, verify_boundary=True)
-                    return
+                    return end_v, False
                 self._wait(d.config.raw['timing']['interval_ms'] / 1000, phase=phase)
 
-        ramp(MOTOR, neutral, fr.throttle_target_v, fr.accel_ramp_s, 'accel_ramp', release,
-             rpm_target=accel_target, compare=self._rpm_compare_accel, timeout_s=cfg.accel_timeout_s)
-        wait_rpm_condition(fr.throttle_target_v, release, 'accel_hold', accel_target,
-                           cfg.accel_timeout_s, self._rpm_compare_accel)
-        ramp(MOTOR, fr.throttle_target_v, neutral, fr.throttle_release_s, 'throttle_release', release)
+        accel_cmd, early_accel = ramp(
+            MOTOR, neutral, fr.throttle_target_v, fr.accel_ramp_s, 'accel_ramp', release,
+            rpm_target=accel_target, compare=self._rpm_compare_accel, timeout_s=cfg.accel_timeout_s)
+        if early_accel:
+            # Transition from current acknowledged command toward neutral — skip hold
+            # that would reapply the full throttle target.
+            ramp(MOTOR, accel_cmd, neutral, fr.throttle_release_s, 'throttle_release', release)
+        else:
+            wait_rpm_condition(fr.throttle_target_v, release, 'accel_hold', accel_target,
+                               cfg.accel_timeout_s, self._rpm_compare_accel)
+            ramp(MOTOR, fr.throttle_target_v, neutral, fr.throttle_release_s, 'throttle_release',
+                 release)
         self._wait(fr.transition_s, phase='transition')
         # Neutral must be acked before brake demand (explicit boundary).
         set_outputs(neutral, release, 'transition', verify_boundary=True)
-        ramp(BRAKE, release, fr.brake_target_v, fr.brake_ramp_s, 'brake_ramp', neutral,
-             rpm_target=brake_target, compare=self._rpm_compare_brake, timeout_s=cfg.brake_timeout_s)
-        wait_rpm_condition(neutral, fr.brake_target_v, 'brake_hold', brake_target,
-                           cfg.brake_timeout_s, self._rpm_compare_brake)
-        ramp(BRAKE, fr.brake_target_v, release, fr.brake_release_s, 'brake_release', neutral)
+        brake_cmd, early_brake = ramp(
+            BRAKE, release, fr.brake_target_v, fr.brake_ramp_s, 'brake_ramp', neutral,
+            rpm_target=brake_target, compare=self._rpm_compare_brake, timeout_s=cfg.brake_timeout_s)
+        if early_brake:
+            # Transition from current brake command toward release — skip hold reapplication.
+            ramp(BRAKE, brake_cmd, release, fr.brake_release_s, 'brake_release', neutral)
+        else:
+            wait_rpm_condition(neutral, fr.brake_target_v, 'brake_hold', brake_target,
+                               cfg.brake_timeout_s, self._rpm_compare_brake)
+            ramp(BRAKE, fr.brake_target_v, release, fr.brake_release_s, 'brake_release', neutral)
         set_outputs(neutral, release, 'brake_release', verify_boundary=True)
         self._wait(fr.recovery_s, phase='recovery')
         if cfg.recovery_rpm_max is not None:
@@ -925,6 +1002,17 @@ class MotorSweepRunner:
         status = TERMINAL_FAULT
         reason = None
         try:
+            # Full closed-loop: validate RPM/domains/feedback before any sweep AOUT write.
+            if self.config.mode == 'full_closed_loop' and self.config.rpm_feedback is not None:
+                fr = self.config.fast_regen
+                rpm_cfg = self.config.rpm_feedback
+                accel_t = fr.accel_rpm_target if fr.accel_rpm_target is not None else rpm_cfg.accel_rpm_target
+                brake_t = fr.brake_rpm_target if fr.brake_rpm_target is not None else rpm_cfg.brake_rpm_target
+                if accel_t is None or brake_t is None:
+                    raise SweepFault(
+                        'full_closed_loop requires accel_rpm_target and brake_rpm_target; '
+                        'no silent fallback to timed open-loop')
+                self._preflight_full_closed_loop(accel_t, brake_t)
             for voltage, direction, visit_index, trip in bidirectional_visits(
                     points,
                     initial_direction=self.config.initial_direction,
@@ -1040,6 +1128,8 @@ def run_standalone_fast_regen(dispatcher, fast_regen: FastRegenConfig, assignmen
     """Assignable Fast Regen Test without voltage sweeping (uses current supply demand)."""
     if MOTOR not in dispatcher.outputs or BRAKE not in dispatcher.outputs:
         raise ConfigError('Fast Regen Test requires vesc_throttle and vesc_brake')
+    if SUPPLY not in dispatcher.outputs:
+        raise ConfigError('Fast Regen Test requires rzxa_voltage_demand (motor supply prerequisite)')
     runner = MotorSweepRunner(
         dispatcher,
         MotorSweepConfig(mode='open_loop', fast_regen=fast_regen, settle_s=0.0),
@@ -1050,17 +1140,18 @@ def run_standalone_fast_regen(dispatcher, fast_regen: FastRegenConfig, assignmen
     )
     dispatcher.active_profile = assignment_name
     dispatcher.active_role = MOTOR
-    dispatcher.active_roles = (MOTOR, BRAKE)
+    dispatcher.active_roles = (SUPPLY, MOTOR, BRAKE)
     dispatcher.interrupted_cycle = True
     dispatcher.started += 1
     try:
         dispatcher.motor_neutral()
         dispatcher.brake_released()
-        supply_before = dispatcher.verify(SUPPLY) if SUPPLY in dispatcher.outputs else None
+        # Motor supply prerequisite: demand must already be established / readable.
+        supply_before = dispatcher.verify(SUPPLY)
         context = SweepContext(
             assignment=assignment_name, mode='open_loop',
-            bus_target_v=aout_to_bus_safe(supply_before, dispatcher) if supply_before is not None else 0.0,
-            expected_aout_v=supply_before or 0.0,
+            bus_target_v=aout_to_bus_safe(supply_before, dispatcher),
+            expected_aout_v=supply_before,
             acked_aout_v=supply_before,
             measured_bus_v=None,
             feedback_policy='open_loop',
@@ -1075,15 +1166,40 @@ def run_standalone_fast_regen(dispatcher, fast_regen: FastRegenConfig, assignmen
         result = runner._run_fast_regen(context)
         dispatcher.motor_neutral()
         dispatcher.brake_released()
+        # Preserve last RZ-XA demand (verify unchanged after pattern).
+        supply_after = dispatcher.verify(SUPPLY)
+        if not math.isclose(supply_after, supply_before, abs_tol=1e-6, rel_tol=0):
+            raise SweepFault('RZ-XA demand changed during standalone Fast Regen')
         dispatcher.completed += 1
         dispatcher.interrupted_cycle = False
-        runner._emit({'event': 'fast_regen_test_complete', **result})
-        return {'status': TERMINAL_COMPLETE, 'run_id': runner.run_id, **result}
+        runner._emit({'event': 'fast_regen_test_complete', **result,
+                      'supply_aout_v': supply_before, 'rzxa_demand_preserved': True})
+        return {'status': TERMINAL_COMPLETE, 'run_id': runner.run_id, **result,
+                'supply_aout_v': supply_before}
     except SweepCancelled as exc:
         failures = runner._apply_cancel_policies()
         dispatcher.interrupted_cycle = bool(failures)
         return {'status': TERMINAL_CANCELLED, 'run_id': runner.run_id, 'reason': str(exc),
-                'cleanup_failures': failures}
+                'cleanup_failures': failures, 'software_stop_is_not_estop': True}
+    except Exception as exc:
+        # Independent fault cleanup for non-cancel exceptions (same policies as sweep).
+        runner._emit({
+            'event': 'fast_regen_test_fault', 'error_type': type(exc).__name__,
+            'error': str(exc), 'no_auto_resume': True,
+        })
+        failures = runner._apply_cancel_policies()
+        dispatcher.interrupted_cycle = True
+        if failures:
+            runner._emit({
+                'event': 'fast_regen_fault_cleanup_incomplete', 'failures': failures,
+                'successful_cleanup': False,
+            })
+        return {
+            'status': TERMINAL_FAULT, 'run_id': runner.run_id,
+            'reason': f'{type(exc).__name__}: {exc}',
+            'cleanup_failures': failures, 'interrupted': True,
+            'no_auto_resume': True,
+        }
     finally:
         dispatcher.sweep_context = None
         dispatcher.active_profile = dispatcher.active_role = None

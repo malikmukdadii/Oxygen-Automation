@@ -868,7 +868,10 @@ class Dispatcher:
         maximum_lateness = 0.0
         pending_boundaries = list(pattern.boundaries)
         configured_interval_ms = interval_s * 1000
+        # Achieved intervals from actual monotonic command timestamps (not schedule diffs).
         achieved_intervals_ms = []
+        last_command_at = None
+        missed_deadlines = 0
         # Catch-up of overdue mandatory boundaries runs synchronously (no sleep), bounded
         # by the number of remaining boundaries so a logic bug cannot spin forever.
         catchup_budget = len(pending_boundaries) + 2
@@ -878,6 +881,8 @@ class Dispatcher:
             now = self.clock()
             late = max(0.0, now - deadline)
             maximum_lateness = max(maximum_lateness, late)
+            if late > 1e-12:
+                missed_deadlines += 1
             if late > max_lateness_s:
                 raise TimeoutError(f'Pattern update exceeded the lateness limit: {late:.3f}s')
             raw_elapsed = now - started
@@ -892,15 +897,27 @@ class Dispatcher:
                     not math.isclose(last_values[role], values[role], abs_tol=1e-12, rel_tol=0)
                     for role in pattern.roles):
                 apply_values(values)
+                command_at = self.clock()
+                if last_command_at is not None:
+                    achieved_intervals_ms.append(max(0.0, (command_at - last_command_at) * 1000))
+                last_command_at = command_at
                 last_values = dict(values)
             if progress_due or at_boundary:
                 verify(values)
+                mean_so_far = (
+                    sum(achieved_intervals_ms) / len(achieved_intervals_ms)
+                    if achieved_intervals_ms else configured_interval_ms)
+                max_so_far = (
+                    max(achieved_intervals_ms) if achieved_intervals_ms else configured_interval_ms)
                 progress({
                     'event': 'progress', 'phase': phase, 'elapsed_s': elapsed,
                     'nominal_duration_s': pattern.duration_s, 'requested': values,
                     'lateness_ms': late * 1000,
                     'io_ms': (self.clock() - operation_started) * 1000,
                     'configured_interval_ms': configured_interval_ms,
+                    'achieved_interval_ms': mean_so_far,
+                    'achieved_interval_max_ms': max_so_far,
+                    'missed_deadlines': missed_deadlines,
                     'mandatory_boundary': at_boundary,
                 })
                 last_progress = elapsed
@@ -917,12 +934,16 @@ class Dispatcher:
                 mean_achieved = (
                     sum(achieved_intervals_ms) / len(achieved_intervals_ms)
                     if achieved_intervals_ms else configured_interval_ms)
+                max_achieved = (
+                    max(achieved_intervals_ms) if achieved_intervals_ms else configured_interval_ms)
                 return {
                     'nominal_duration_s': pattern.duration_s, 'actual_elapsed_s': actual_elapsed,
                     'completion_lateness_ms': completion_lateness * 1000,
                     'skipped_update_slots': skipped, 'maximum_lateness_ms': maximum_lateness * 1000,
                     'configured_interval_ms': configured_interval_ms,
                     'achieved_interval_ms': mean_achieved,
+                    'achieved_interval_max_ms': max_achieved,
+                    'missed_deadlines': missed_deadlines,
                 }
             after = elapsed
             # If more mandatory boundaries are already due, process the next one immediately.
@@ -938,7 +959,6 @@ class Dispatcher:
             future = [due_index * interval_s, pattern.duration_s]
             future.extend(t for t in pending_boundaries if t > after + 1e-12)
             next_deadline = started + min(future)
-            achieved_intervals_ms.append(max(0.0, (next_deadline - deadline)) * 1000)
             deadline = next_deadline
 
     def cleanup(self):

@@ -13,8 +13,8 @@ performed by agents — validate physical SCPI timing manually on the chassis.
 |---|---|---|
 | Fast Regen Test | `fast_regen_test` | Standalone ~4.35 s pattern at current supply demand |
 | Open Loop Sweep | `motor_sweep_open_loop` | Fixed settle after AOUT ack; no measurement gate |
-| Voltage Closed Loop Sweep | `motor_sweep_voltage_closed_loop` | Supervisory measured-bus qualification |
-| Full Closed Loop Sweep | `motor_sweep_full_closed_loop` | Voltage qualify + RPM-governed holds |
+| Voltage Closed Loop Sweep | `motor_sweep_voltage_closed_loop` | Supervisory measured-bus qualification (**`enabled: false`** until bus channel commissioned) |
+| Full Closed Loop Sweep | `motor_sweep_full_closed_loop` | Voltage qualify + RPM-governed holds (**`enabled: false`** until RPM targets + channel commissioned) |
 | Stop Sweep | `stop_sweep` | Cooperative software cancel (not a physical E-stop) |
 
 Existing CES / RZ-XA eight-button assignments remain available. New buttons are
@@ -70,8 +70,14 @@ Independently configurable; schema floor **10 ms**:
 | RPM feedback poll | 20 ms |
 
 Reuse the persistent SCPI session. Unchanged setpoints are not rewritten. Timeline
-JSONL already logs `lateness_ms`, `interval_ms`, `skipped_update_slots`, and
-`maximum_lateness_ms`. No separate benchmark utility.
+JSONL logs `configured_interval_ms`, mean/max `achieved_interval_ms` (from actual
+monotonic command timestamps), `missed_deadlines`, `lateness_ms`, and
+`skipped_update_slots`. Host SCPI timestamps / query sequence are **not** verified
+acquisition freshness. No separate benchmark utility.
+
+Assignment `parameters.brake_target_v` always overrides shared Fast Regen defaults
+(deep-merge for nested `fast_regen` keys). Uncommissioned closed-loop buttons stay
+`enabled: false` so open-loop dispatcher startup has no new measurement dependencies.
 
 ## Progressive commissioning
 

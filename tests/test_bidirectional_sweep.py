@@ -180,13 +180,24 @@ def test_sweep_example_loads_with_timing_defaults():
     config = load_dispatcher_config(SWEEP)
     assert config.raw['timing']['poll_ms'] == 20
     assert config.raw['timing']['interval_ms'] == 20
-    assert set(config.motor_sweeps) == {
-        'motor_sweep_open_loop', 'motor_sweep_voltage_closed_loop', 'motor_sweep_full_closed_loop',
-    }
+    # Uncommissioned closed-loop assignments stay disabled; open-loop + Fast Regen load.
+    assert set(config.motor_sweeps) == {'motor_sweep_open_loop'}
     assert 'fast_regen_test' in config.fast_regens
     assert config.stop_sweep_trigger == 'Stop Sweep'
-    assert config.motor_sweeps['motor_sweep_voltage_closed_loop'].voltage_qualify.poll_s == 0.02
-    assert config.motor_sweeps['motor_sweep_full_closed_loop'].rpm_feedback.poll_s == 0.02
+    cl_names = {
+        a['name'] for a in config.raw['assignments']
+        if a.get('name') in {
+            'motor_sweep_voltage_closed_loop', 'motor_sweep_full_closed_loop',
+        }
+    }
+    assert cl_names == {
+        'motor_sweep_voltage_closed_loop', 'motor_sweep_full_closed_loop',
+    }
+    assert all(
+        a.get('enabled') is False
+        for a in config.raw['assignments']
+        if a.get('name') in cl_names
+    )
 
 
 def test_continuous_example_requires_explicit_flag():

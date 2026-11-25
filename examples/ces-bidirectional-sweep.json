@@ -173,6 +173,7 @@
     },
     {
       "name": "motor_sweep_voltage_closed_loop",
+      "enabled": false,
       "kind": "motor_sweep",
       "trigger": "Voltage Closed Loop Sweep",
       "output": "vesc_throttle",
@@ -192,6 +193,7 @@
     },
     {
       "name": "motor_sweep_full_closed_loop",
+      "enabled": false,
       "kind": "motor_sweep",
       "trigger": "Full Closed Loop Sweep",
       "output": "vesc_throttle",

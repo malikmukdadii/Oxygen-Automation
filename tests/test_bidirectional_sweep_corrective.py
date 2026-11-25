@@ -164,10 +164,16 @@ def test_deep_merge_and_brake_target_override(tmp_path):
                 'mode': 'open_loop', 'round_trips': 1, 'continuous': False,
                 'start_v': 39.0, 'end_v': 40.0, 'step_v': 1.0,
             }
+        if assignment.get('name') == 'fast_regen_test':
+            # parameters.brake_target_v always wins over nested fast_regen + defaults.
+            assignment['fast_regen'] = {'brake_target_v': 0.15, 'throttle_target_v': 1.6}
+            assignment['parameters'] = {'brake_target_v': 0.28}
     path = tmp_path / 'm.json'
     path.write_text(json.dumps(raw), encoding='utf-8')
     config = load_dispatcher_config(path)
     assert config.motor_sweeps['motor_sweep_open_loop'].fast_regen.brake_target_v == pytest.approx(0.33)
+    assert config.fast_regens['fast_regen_test'].brake_target_v == pytest.approx(0.28)
+    assert config.fast_regens['fast_regen_test'].throttle_target_v == pytest.approx(1.6)
 
 
 # --- Finding 3: freshness ---
@@ -300,8 +306,11 @@ def test_rpm_monitored_during_accel_ramp(tmp_path):
     dispatcher.backend.connect()
     dispatcher.prepare()
     original = dispatcher.command
+    motor_cmds = []
 
     def tracking(role, value):
+        if role == MOTOR:
+            motor_cmds.append(value)
         original(role, value)
         if role == SUPPLY:
             backend.inject('dc_bus_voltage', value * 80.0)
@@ -317,6 +326,12 @@ def test_rpm_monitored_during_accel_ramp(tmp_path):
     assert runner.run().status == 'complete'
     ramp_hits = [r for r in records if r.get('event') == 'sweep_rpm_target_reached' and r.get('during_ramp')]
     assert ramp_hits
+    accel_hits = [r for r in ramp_hits if r.get('phase') == 'accel_ramp']
+    assert accel_hits
+    assert all(r.get('jumped_to_full_target') is False for r in accel_hits)
+    # Early accel qualify keeps current command; never reapply full 0.4 V target in hold.
+    assert all(r.get('command_at_qualify_v') < 0.4 - 1e-9 for r in accel_hits)
+    assert max(motor_cmds) < 0.4 - 1e-9
 
 
 # --- Finding 2: OxygenBackend numeric RPM ---
@@ -435,6 +450,11 @@ def test_production_multi_timeline_respects_boundaries_under_lateness(tmp_path):
         if role == BRAKE and value > 0:
             assert last_motor == 0.0
     assert any(r.get('mandatory_boundary') for r in records)
+    assert 'configured_interval_ms' in result
+    assert 'achieved_interval_ms' in result
+    assert 'achieved_interval_max_ms' in result
+    assert 'missed_deadlines' in result
+    assert result['configured_interval_ms'] == pytest.approx(20.0)
 
 
 # --- Finding 9: sample_supervisory returns Sample ---
@@ -447,3 +467,120 @@ def test_sample_supervisory_returns_sample_object(tmp_path):
     sample = dispatcher.sample_supervisory('dc_bus_voltage', max_age=1.0)
     assert hasattr(sample, 'value')
     assert sample.value == 40.0
+
+
+# --- Final corrective pass ---
+
+def test_full_closed_loop_preflight_rejects_bad_rpm_ordering(tmp_path):
+    dispatcher, backend, clock, records, config = _load(tmp_path)
+    sweep = parse_motor_sweep({
+        'mode': 'full_closed_loop', 'start_v': 39.0, 'end_v': 40.0, 'step_v': 1.0,
+        'round_trips': 1, 'settle_s': 0.0,
+        'voltage_qualify': {
+            'channel': 'dc_bus_voltage', 'tolerance_v': 0.5, 'qualify_duration_s': 0.02,
+            'timeout_s': 2.0, 'poll_s': 0.02, 'max_age_s': 1.0,
+        },
+        'rpm_feedback': {
+            'channel': 'erpm', 'kind': 'electrical', 'poll_s': 0.02, 'max_age_s': 1.0,
+        },
+        'fast_regen': {
+            'throttle_target_v': 0.4, 'brake_target_v': 0.2,
+            'accel_ramp_s': 0.1, 'accel_hold_s': 0.1, 'throttle_release_s': 0.1,
+            'transition_s': 0.1, 'brake_ramp_s': 0.1, 'brake_hold_s': 0.1,
+            'brake_release_s': 0.1, 'recovery_s': 0.1,
+            'accel_rpm_target': 50, 'brake_rpm_target': 500, 'rpm_kind': 'electrical',
+        },
+    }, outputs=config.raw['outputs'])
+    dispatcher.backend.connect()
+    dispatcher.prepare()
+    backend.inject('erpm', 0.0)
+    runner = MotorSweepRunner(dispatcher, sweep, 'motor_sweep_full_closed_loop')
+    with pytest.raises(SweepFault, match='RPM ordering'):
+        runner.run()
+    assert not any(r.get('event') == 'sweep_supply_commanded' for r in records)
+
+
+def test_full_closed_loop_preflight_requires_pole_pairs_for_domain_mismatch(tmp_path):
+    dispatcher, backend, clock, records, config = _load(tmp_path)
+    sweep = parse_motor_sweep({
+        'mode': 'full_closed_loop', 'start_v': 39.0, 'end_v': 40.0, 'step_v': 1.0,
+        'round_trips': 1, 'settle_s': 0.0,
+        'voltage_qualify': {
+            'channel': 'dc_bus_voltage', 'tolerance_v': 0.5, 'qualify_duration_s': 0.02,
+            'timeout_s': 2.0, 'poll_s': 0.02, 'max_age_s': 1.0,
+        },
+        'rpm_feedback': {
+            'channel': 'erpm', 'kind': 'electrical', 'poll_s': 0.02, 'max_age_s': 1.0,
+        },
+        'fast_regen': {
+            'throttle_target_v': 0.4, 'brake_target_v': 0.2,
+            'accel_ramp_s': 0.1, 'accel_hold_s': 0.1, 'throttle_release_s': 0.1,
+            'transition_s': 0.1, 'brake_ramp_s': 0.1, 'brake_hold_s': 0.1,
+            'brake_release_s': 0.1, 'recovery_s': 0.1,
+            'accel_rpm_target': 500, 'brake_rpm_target': 50, 'rpm_kind': 'mechanical',
+        },
+    }, outputs=config.raw['outputs'])
+    dispatcher.backend.connect()
+    dispatcher.prepare()
+    backend.inject('erpm', 0.0)
+    runner = MotorSweepRunner(dispatcher, sweep, 'motor_sweep_full_closed_loop')
+    with pytest.raises(SweepFault, match='pole_pairs required'):
+        runner.run()
+
+
+def test_standalone_fast_regen_fault_cleanup_independent(tmp_path):
+    dispatcher, backend, clock, records, config = _load(tmp_path)
+    dispatcher.backend.connect()
+    dispatcher.prepare()
+    dispatcher.command(SUPPLY, 0.5)
+    fr = parse_fast_regen({
+        'throttle_target_v': 0.4, 'brake_target_v': 0.2,
+        'accel_ramp_s': 0.1, 'accel_hold_s': 0.1, 'throttle_release_s': 0.1,
+        'transition_s': 0.1, 'brake_ramp_s': 0.1, 'brake_hold_s': 0.1,
+        'brake_release_s': 0.1, 'recovery_s': 0.1,
+    }, motor_max_v=1.6, brake_max_v=3.3)
+
+    def boom(*_a, **_k):
+        raise InterlockError('injected pattern fault')
+
+    dispatcher._run_multi_timeline = boom
+    result = run_standalone_fast_regen(dispatcher, fr, 'fast_regen_test')
+    assert result['status'] == 'fault'
+    assert result.get('interrupted') is True
+    assert dispatcher.interrupted_cycle is True
+    assert any(r.get('event') == 'fast_regen_test_fault' for r in records)
+    # Motor cleanup attempted independently; RZ-XA demand preserved by cancel policy.
+    assert dispatcher.states[SUPPLY].value == pytest.approx(0.5)
+
+
+def test_uncommissioned_closed_loop_disabled_open_loop_starts(tmp_path):
+    raw = json.loads(SWEEP.read_text(encoding='utf-8-sig'))
+    raw = _resolve_profiles(raw, SWEEP)
+    # Drop measurement channels entirely — open-loop must still load when CL is disabled.
+    raw['measurements'] = {}
+    if isinstance(raw.get('simulation'), dict):
+        raw['simulation']['telemetry'] = {}
+    path = tmp_path / 'ol.json'
+    path.write_text(json.dumps(raw), encoding='utf-8')
+    config = load_dispatcher_config(path)
+    assert 'motor_sweep_open_loop' in config.motor_sweeps
+    assert 'motor_sweep_voltage_closed_loop' not in config.motor_sweeps
+    assert 'motor_sweep_full_closed_loop' not in config.motor_sweeps
+    clock, records = Clock(), []
+    backend = MemoryBackend(config, clock=clock)
+    dispatcher = Dispatcher(config, backend, records.append, clock=clock, wait=clock.wait)
+    dispatcher.backend.connect()
+    dispatcher.prepare()
+    assert dispatcher.prepared
+
+
+def test_host_scpi_sequence_not_claimed_as_acquisition_freshness():
+    from oxygen_engine.motor_sweep import (
+        _acquisition_freshness_verified, _sample_freshness_key,
+    )
+    sample = Sample(40.0, 1.0, 'OXYGEN 1/numeric', simulated=True,
+                    acquisition_time_s=None, sequence=7, freshness='host_scpi')
+    assert _acquisition_freshness_verified(sample) is False
+    key = _sample_freshness_key(sample)
+    assert key[0] == 'host_scpi'
+    assert 'acquisition' not in key[0]

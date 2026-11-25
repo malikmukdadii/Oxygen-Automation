@@ -865,11 +865,20 @@ def load_dispatcher_config(path) -> DispatcherConfig:
             if assignment.get('profile'):
                 raise ConfigError('fast_regen assignments use fast_regen config, not profile')
             from .fast_regen import parse_fast_regen
-            regen_raw = assignment.get('fast_regen') or defaults.get('fast_regen') or {}
-            # Prefer assignment parameters.brake_target_v when present.
+            from .motor_sweep import deep_merge
+            # Same deep-merge semantics as motor_sweep: defaults ← assignment.fast_regen.
+            base = defaults.get('fast_regen') or {}
+            override = assignment.get('fast_regen') or {}
+            if base and not isinstance(base, dict):
+                raise ConfigError('motor_sweep_defaults.fast_regen must be an object')
+            if override and not isinstance(override, dict):
+                raise ConfigError(f'{name}: fast_regen must be an object')
+            regen_raw = deep_merge(dict(base) if isinstance(base, dict) else {},
+                                   dict(override) if isinstance(override, dict) else {})
             parameters = assignment.get('parameters') or {}
-            if isinstance(parameters, dict) and 'brake_target_v' in parameters and 'brake_target_v' not in regen_raw:
-                regen_raw = {**regen_raw, 'brake_target_v': parameters['brake_target_v']}
+            if isinstance(parameters, dict) and 'brake_target_v' in parameters:
+                # Explicit assignment brake_target_v always overrides shared Fast Regen defaults.
+                regen_raw['brake_target_v'] = parameters['brake_target_v']
             fast_regens[name] = parse_fast_regen(
                 regen_raw,
                 motor_max_v=outputs[MOTOR]['max_aout_v'],

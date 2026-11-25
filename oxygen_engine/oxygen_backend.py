@@ -544,8 +544,9 @@ class OxygenBackend:
                     if not math.isfinite(value):
                         raise InterlockError(f'Nonfinite measured value for {name}')
                     # Limitation: this SCPI path does not expose a per-sample acquisition
-                    # timestamp with :NUMeric:NORMal:VALue?; freshness is host-SCPI completion
-                    # time. Supervisory qualification must still see advancing host samples.
+                    # timestamp with :NUMeric:NORMal:VALue?. Host completion time and the
+                    # local query counter (`sequence`) are NOT verified acquisition freshness.
+                    # Callers may use them only for host-side sample-change detection.
                     seq = getattr(self, '_measure_seq', 0) + 1
                     self._measure_seq = seq
                     self.error()
