@@ -817,17 +817,24 @@ class MotorSweepRunner:
                     set_outputs(other_safe, end_v, phase, verify_boundary=True)
                 return end_v, False
             began = d.clock()
+            met_since = None
+            froze_at = None
             while True:
                 self._raise_if_cancelled(phase)
                 ensure_supply(force=False)
                 elapsed = d.clock() - began
                 frac = 1.0 if elapsed >= duration_s else elapsed / duration_s
-                value = start_v + (end_v - start_v) * frac
-                current = value
-                if role == MOTOR:
-                    set_outputs(value, other_safe, phase, verify_boundary=False)
+                if froze_at is None:
+                    value = start_v + (end_v - start_v) * frac
+                    current = value
                 else:
-                    set_outputs(other_safe, value, phase, verify_boundary=False)
+                    # Freeze at first in-band sample while qualify_duration accumulates
+                    # (same semantics as hold-phase RPM qualification).
+                    current = froze_at
+                if role == MOTOR:
+                    set_outputs(current, other_safe, phase, verify_boundary=False)
+                else:
+                    set_outputs(other_safe, current, phase, verify_boundary=False)
                 if cfg.monitor_during_ramps and rpm_target is not None and compare is not None:
                     rpm, sample = read_rpm()
                     self._emit({
@@ -836,31 +843,43 @@ class MotorSweepRunner:
                         'during_ramp': True,
                         'freshness': getattr(sample, 'freshness', 'host_scpi'),
                         'acquisition_freshness_verified': _acquisition_freshness_verified(sample),
+                        'qualify_duration_s': cfg.qualify_duration_s,
                     })
                     if compare(rpm, rpm_target, cfg):
-                        # Hold current command — no jump to full target.
-                        if role == MOTOR:
-                            set_outputs(current, other_safe, phase, verify_boundary=True)
-                        else:
-                            set_outputs(other_safe, current, phase, verify_boundary=True)
-                        self._emit({
-                            'event': 'sweep_rpm_target_reached', 'phase': phase,
-                            'rpm': rpm, 'target_rpm': rpm_target, 'during_ramp': True,
-                            'command_at_qualify_v': current,
-                            'full_target_v': end_v,
-                            'jumped_to_full_target': False,
-                        })
-                        return current, True
+                        now = d.clock()
+                        if met_since is None:
+                            met_since = now
+                            froze_at = current
+                            if role == MOTOR:
+                                set_outputs(current, other_safe, phase, verify_boundary=True)
+                            else:
+                                set_outputs(other_safe, current, phase, verify_boundary=True)
+                        if now - met_since >= cfg.qualify_duration_s:
+                            self._emit({
+                                'event': 'sweep_rpm_target_reached', 'phase': phase,
+                                'rpm': rpm, 'target_rpm': rpm_target, 'during_ramp': True,
+                                'command_at_qualify_v': current,
+                                'full_target_v': end_v,
+                                'jumped_to_full_target': False,
+                                'qualify_duration_s': cfg.qualify_duration_s,
+                            })
+                            return current, True
+                    else:
+                        met_since = None
+                        froze_at = None
                     if timeout_s is not None and d.clock() - began > timeout_s:
                         raise SweepFault(
                             f'RPM target not reached during {phase} within {timeout_s}s')
-                if frac >= 1.0:
+                if froze_at is None and frac >= 1.0:
                     if role == MOTOR:
                         set_outputs(end_v, other_safe, phase, verify_boundary=True)
                     else:
                         set_outputs(other_safe, end_v, phase, verify_boundary=True)
                     return end_v, False
-                self._wait(d.config.raw['timing']['interval_ms'] / 1000, phase=phase)
+                self._wait(
+                    cfg.poll_s if froze_at is not None
+                    else d.config.raw['timing']['interval_ms'] / 1000,
+                    phase=phase)
 
         accel_cmd, early_accel = ramp(
             MOTOR, neutral, fr.throttle_target_v, fr.accel_ramp_s, 'accel_ramp', release,
@@ -1146,7 +1165,14 @@ def run_standalone_fast_regen(dispatcher, fast_regen: FastRegenConfig, assignmen
     try:
         dispatcher.motor_neutral()
         dispatcher.brake_released()
-        # Motor supply prerequisite: demand must already be established / readable.
+        # Respect configured motor supply prerequisite (discrete/scalar grid), not merely
+        # any readable RZ-XA demand. Check before sweep_context is set so the grid guard runs.
+        class _StandaloneProfile:
+            requires = {}
+            output = MOTOR
+
+        dispatcher.sweep_context = None
+        dispatcher.motor_interlocks(_StandaloneProfile())
         supply_before = dispatcher.verify(SUPPLY)
         context = SweepContext(
             assignment=assignment_name, mode='open_loop',

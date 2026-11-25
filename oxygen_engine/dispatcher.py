@@ -869,9 +869,24 @@ class Dispatcher:
         pending_boundaries = list(pattern.boundaries)
         configured_interval_ms = interval_s * 1000
         # Achieved intervals from actual monotonic command timestamps (not schedule diffs).
+        # Active-ramp updates are logged separately from gaps that include intentional holds.
         achieved_intervals_ms = []
+        active_ramp_intervals_ms = []
+        hold_inclusive_intervals_ms = []
         last_command_at = None
+        last_command_phase = None
         missed_deadlines = 0
+
+        def _phase_is_hold(name):
+            text = (name or '').lower()
+            return (
+                'hold' in text or text in {'transition', 'recovery'} or 'recover' in text)
+
+        def _summarize(samples):
+            if not samples:
+                return configured_interval_ms, configured_interval_ms
+            return sum(samples) / len(samples), max(samples)
+
         # Catch-up of overdue mandatory boundaries runs synchronously (no sleep), bounded
         # by the number of remaining boundaries so a logic bug cannot spin forever.
         catchup_budget = len(pending_boundaries) + 2
@@ -899,16 +914,22 @@ class Dispatcher:
                 apply_values(values)
                 command_at = self.clock()
                 if last_command_at is not None:
-                    achieved_intervals_ms.append(max(0.0, (command_at - last_command_at) * 1000))
+                    delta_ms = max(0.0, (command_at - last_command_at) * 1000)
+                    achieved_intervals_ms.append(delta_ms)
+                    # Continuous ramp/release updates vs gaps that span intentional holds.
+                    if (not _phase_is_hold(last_command_phase) and not _phase_is_hold(phase)
+                            and delta_ms <= configured_interval_ms * 2.5):
+                        active_ramp_intervals_ms.append(delta_ms)
+                    else:
+                        hold_inclusive_intervals_ms.append(delta_ms)
                 last_command_at = command_at
+                last_command_phase = phase
                 last_values = dict(values)
             if progress_due or at_boundary:
                 verify(values)
-                mean_so_far = (
-                    sum(achieved_intervals_ms) / len(achieved_intervals_ms)
-                    if achieved_intervals_ms else configured_interval_ms)
-                max_so_far = (
-                    max(achieved_intervals_ms) if achieved_intervals_ms else configured_interval_ms)
+                mean_so_far, max_so_far = _summarize(achieved_intervals_ms)
+                ramp_mean, ramp_max = _summarize(active_ramp_intervals_ms)
+                hold_mean, hold_max = _summarize(hold_inclusive_intervals_ms)
                 progress({
                     'event': 'progress', 'phase': phase, 'elapsed_s': elapsed,
                     'nominal_duration_s': pattern.duration_s, 'requested': values,
@@ -917,6 +938,10 @@ class Dispatcher:
                     'configured_interval_ms': configured_interval_ms,
                     'achieved_interval_ms': mean_so_far,
                     'achieved_interval_max_ms': max_so_far,
+                    'achieved_ramp_interval_ms': ramp_mean,
+                    'achieved_ramp_interval_max_ms': ramp_max,
+                    'achieved_hold_inclusive_interval_ms': hold_mean,
+                    'achieved_hold_inclusive_interval_max_ms': hold_max,
                     'missed_deadlines': missed_deadlines,
                     'mandatory_boundary': at_boundary,
                 })
@@ -931,11 +956,9 @@ class Dispatcher:
                 if completion_lateness > max_lateness_s:
                     raise TimeoutError(
                         f'Final setpoint acknowledgement exceeded the completion limit: {completion_lateness:.3f}s')
-                mean_achieved = (
-                    sum(achieved_intervals_ms) / len(achieved_intervals_ms)
-                    if achieved_intervals_ms else configured_interval_ms)
-                max_achieved = (
-                    max(achieved_intervals_ms) if achieved_intervals_ms else configured_interval_ms)
+                mean_achieved, max_achieved = _summarize(achieved_intervals_ms)
+                ramp_mean, ramp_max = _summarize(active_ramp_intervals_ms)
+                hold_mean, hold_max = _summarize(hold_inclusive_intervals_ms)
                 return {
                     'nominal_duration_s': pattern.duration_s, 'actual_elapsed_s': actual_elapsed,
                     'completion_lateness_ms': completion_lateness * 1000,
@@ -943,6 +966,10 @@ class Dispatcher:
                     'configured_interval_ms': configured_interval_ms,
                     'achieved_interval_ms': mean_achieved,
                     'achieved_interval_max_ms': max_achieved,
+                    'achieved_ramp_interval_ms': ramp_mean,
+                    'achieved_ramp_interval_max_ms': ramp_max,
+                    'achieved_hold_inclusive_interval_ms': hold_mean,
+                    'achieved_hold_inclusive_interval_max_ms': hold_max,
                     'missed_deadlines': missed_deadlines,
                 }
             after = elapsed

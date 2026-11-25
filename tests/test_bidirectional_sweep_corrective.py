@@ -584,3 +584,118 @@ def test_host_scpi_sequence_not_claimed_as_acquisition_freshness():
     key = _sample_freshness_key(sample)
     assert key[0] == 'host_scpi'
     assert 'acquisition' not in key[0]
+
+
+def test_standalone_fast_regen_requires_configured_supply_prerequisite(tmp_path):
+    dispatcher, backend, clock, records, config = _load(tmp_path)
+    dispatcher.backend.connect()
+    dispatcher.prepare()
+    # Readable but not on the configured motor_supply_demands_v grid.
+    dispatcher.command(SUPPLY, 0.0)
+    fr = parse_fast_regen({
+        'throttle_target_v': 0.4, 'brake_target_v': 0.2,
+        'accel_ramp_s': 0.05, 'accel_hold_s': 0.05, 'throttle_release_s': 0.05,
+        'transition_s': 0.05, 'brake_ramp_s': 0.05, 'brake_hold_s': 0.05,
+        'brake_release_s': 0.05, 'recovery_s': 0.05,
+    }, motor_max_v=1.6, brake_max_v=3.3)
+    result = run_standalone_fast_regen(dispatcher, fr, 'fast_regen_test')
+    assert result['status'] == 'fault'
+    assert 'prerequisite' in result['reason'].lower() or 'Supply demand' in result['reason']
+    assert not any(r.get('event') == 'fast_regen_test_complete' for r in records)
+
+
+def test_rpm_ramp_honors_qualify_duration(tmp_path):
+    dispatcher, backend, clock, records, config = _load(tmp_path)
+    sweep = parse_motor_sweep({
+        'mode': 'full_closed_loop', 'start_v': 39.0, 'end_v': 40.0, 'step_v': 1.0,
+        'round_trips': 1, 'settle_s': 0.0,
+        'voltage_qualify': {
+            'channel': 'dc_bus_voltage', 'tolerance_v': 0.5, 'qualify_duration_s': 0.02,
+            'timeout_s': 2.0, 'poll_s': 0.02, 'max_age_s': 1.0,
+        },
+        'rpm_feedback': {
+            'channel': 'erpm', 'kind': 'electrical', 'poll_s': 0.02, 'max_age_s': 1.0,
+            'accel_timeout_s': 5.0, 'brake_timeout_s': 5.0,
+            'monitor_during_ramps': True, 'rpm_tolerance': 10,
+            'qualify_duration_s': 0.12,
+        },
+        'fast_regen': {
+            'throttle_target_v': 0.4, 'brake_target_v': 0.2,
+            'accel_ramp_s': 1.0, 'accel_hold_s': 10.0, 'throttle_release_s': 0.1,
+            'transition_s': 0.1, 'brake_ramp_s': 0.2, 'brake_hold_s': 10.0,
+            'brake_release_s': 0.1, 'recovery_s': 0.1,
+            'accel_rpm_target': 500, 'brake_rpm_target': 50, 'rpm_kind': 'electrical',
+        },
+    }, outputs=config.raw['outputs'])
+    dispatcher.backend.connect()
+    dispatcher.prepare()
+    original = dispatcher.command
+
+    def tracking(role, value):
+        original(role, value)
+        if role == SUPPLY:
+            backend.inject('dc_bus_voltage', value * 80.0)
+        if role == MOTOR and value > 0.05:
+            backend.inject('erpm', 600.0)
+        if role == BRAKE and value > 0:
+            backend.inject('erpm', 40.0)
+
+    dispatcher.command = tracking
+    backend.inject('dc_bus_voltage', 40.0)
+    backend.inject('erpm', 0.0)
+    runner = MotorSweepRunner(dispatcher, sweep, 'motor_sweep_full_closed_loop')
+    assert runner.run().status == 'complete'
+    first_in_band = next(
+        r for r in records
+        if r.get('event') == 'sweep_rpm_sample' and r.get('during_ramp')
+        and r.get('phase') == 'accel_ramp' and r.get('rpm', 0) >= 500)
+    reached = next(
+        r for r in records
+        if r.get('event') == 'sweep_rpm_target_reached' and r.get('phase') == 'accel_ramp')
+    # Qualify duration must elapse (same rule as hold-phase); not instantaneous.
+    in_band_at = first_in_band.get('elapsed_s')
+    # Use wall clock via progress of wait: frozen qualify uses poll waits totaling >= 0.12.
+    assert reached.get('qualify_duration_s') == pytest.approx(0.12)
+    assert clock.now >= 0.12
+
+
+def test_timeline_logs_ramp_intervals_separate_from_hold_gaps(tmp_path):
+    dispatcher, backend, clock, records, config = _load(tmp_path, use_production_timeline=True)
+    from oxygen_engine.fast_regen import build_fast_regen_pattern
+    from oxygen_engine.constant_pattern import execute_timeline
+
+    dispatcher.timeline = execute_timeline
+    dispatcher.backend.connect()
+    dispatcher.prepare()
+    dispatcher.command(SUPPLY, 0.5)
+    fr = parse_fast_regen({
+        'throttle_target_v': 0.4, 'brake_target_v': 0.2,
+        'accel_ramp_s': 0.06, 'accel_hold_s': 0.20, 'throttle_release_s': 0.06,
+        'transition_s': 0.04, 'brake_ramp_s': 0.06, 'brake_hold_s': 0.20,
+        'brake_release_s': 0.06, 'recovery_s': 0.04,
+    }, motor_max_v=1.6, brake_max_v=3.3)
+    pattern = build_fast_regen_pattern(fr)
+    last = {MOTOR: None, BRAKE: None}
+
+    def apply_values(values):
+        for role in pattern.roles:
+            target = values[role]
+            if last[role] is None or abs(last[role] - target) > 1e-12:
+                clock.now += 0.001
+                dispatcher.command(role, target)
+                last[role] = target
+
+    def verify(values):
+        for role, target in values.items():
+            dispatcher.verify(role, target)
+
+    def progress(record):
+        records.append(record)
+
+    result = dispatcher._run_multi_timeline(
+        pattern, apply_values, verify, progress, wait=clock.wait)
+    assert 'achieved_ramp_interval_ms' in result
+    assert 'achieved_hold_inclusive_interval_ms' in result
+    # Hold-inclusive gaps include intentional accel/brake holds (~200 ms) → larger than ramp ticks.
+    assert result['achieved_hold_inclusive_interval_ms'] > result['achieved_ramp_interval_ms']
+    assert result['achieved_ramp_interval_ms'] <= result['configured_interval_ms'] * 2.5
