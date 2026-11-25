@@ -348,10 +348,14 @@ def test_eight_button_excess_latency_discards_edges_without_relaxing_timeout(tmp
     assert dispatcher.config.raw['timing']['max_trigger_gap_ms'] == 250
 
 
-def test_ninth_assignment_rejected_and_existing_six_preserved(tmp_path):
+def test_seventeenth_assignment_rejected_and_existing_six_preserved(tmp_path):
+    # Assignment ceiling raised 8 → 16 so CES buttons can coexist with sweep controls.
     raw = raw_config()
-    raw['assignments'].append(dict(raw['assignments'][0], name='ninth', trigger='Operator ninth'))
-    with pytest.raises(ConfigError, match='1..8'):
+    base = raw['assignments'][0]
+    while len(raw['assignments']) < 17:
+        index = len(raw['assignments']) + 1
+        raw['assignments'].append(dict(base, name=f'extra_{index}', trigger=f'Operator extra {index}'))
+    with pytest.raises(ConfigError, match='1..16'):
         load(tmp_path, raw)
     legacy = load_dispatcher_config(ROOT / 'dispatcher.example.json')
     assert len(legacy.profiles) == 6

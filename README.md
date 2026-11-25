@@ -28,11 +28,14 @@ Illustrative variants live under `examples/` and must not be confused with the a
 | `dispatcher.example.json` | Committed starter (memory dual-output) |
 | `examples/memory-dual.json` | Offline dual-output fixture |
 | `examples/ces-eight-button.json` | Offline eight-button CES example; relative RZ-XA demand stepping |
+| `examples/ces-bidirectional-sweep.json` | CES eight buttons + Fast Regen / three sweep modes / Stop Sweep (20 ms timing) |
+| `examples/ces-bidirectional-sweep-continuous.json` | Explicit continuous open-loop sweep + Stop Sweep |
 | `examples/ces-motor-commissioning.json` | Memory-only current-demand candidates; 0 V normal stop / staged 1.00 V max |
 | `examples/supply-only.json` | Supply-only RZ-XA commissioning |
 | `examples/oxygen-demo.json` | Simulated OXYGEN demo |
 | `examples/physical-dual.json` | Physical dual-output template |
 | `profiles/` | Shared profile library |
+| [Bidirectional regen sweep commissioning](docs/bidirectional-regen-sweep-commissioning.md) | Sweep modes, grid math, SCPI timing, migration |
 
 ## Workflow
 
